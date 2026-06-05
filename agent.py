@@ -207,13 +207,42 @@ def process_cluster(signal_data: dict) -> str:
     signal.case_rate = (signal.cases / signal.population) * 100000
     
     history = get_outbreak_history(signal.disease, signal.region)
-    
     signal.anomaly_score = calculate_anomaly_score(signal, history)
-    classification = classify_outbreak(signal, history)
-    severity = assess_severity(signal)
-    spread = predict_spread(signal, classification)
-    advice = generate_safety_advice(signal.disease, severity, signal.region, classification.value)
-    ai_summary = generate_ai_summary(signal, classification, severity, spread)
+
+    mcp_result = None
+    try:
+        from mcp_agent import run_mcp_agent_with_tools
+        from db import db as mongo_db
+        mcp_result = asyncio.run(run_mcp_agent_with_tools(signal_data, mongo_db))
+    except Exception as e:
+        print(f"[MCP Agent error] {e}")
+
+    if mcp_result:
+        try:
+            classification = OutbreakClassification(mcp_result.get("classification", "pending"))
+            severity = SeverityLevel(mcp_result.get("severity", "moderate"))
+            spread = mcp_result.get("spread_prediction", {})
+            advice_raw = mcp_result.get("safety_advice", {})
+            advice = {
+                AudienceType.PUBLIC.value: advice_raw.get("public", ""),
+                AudienceType.PRACTITIONER.value: advice_raw.get("practitioner", ""),
+                AudienceType.NGO.value: advice_raw.get("ngo", "")
+            }
+            ai_summary = mcp_result.get("ai_summary", "")
+            ai_assessment = mcp_result.get("ai_assessment", f"Anomaly score {signal.anomaly_score:.2f}.")
+            print(f"[MCP Agent] Reasoning complete — {classification.value}/{severity.value}")
+        except Exception as e:
+            print(f"[MCP Agent parse error] {e} - falling back")
+            mcp_result = None
+
+    if not mcp_result:
+        classification = classify_outbreak(signal, history)
+        severity = assess_severity(signal)
+        spread = predict_spread(signal, classification)
+        advice = generate_safety_advice(signal.disease, severity, signal.region, classification)
+        ai_summary = generate_ai_summary(signal, classification, severity, spread)
+        ai_assessment = f"Anomaly score {signal.anomaly_score:.2f}. Classification: {classification.value}."
+    
     
     alert = {
         "disease": signal.disease,
@@ -221,7 +250,7 @@ def process_cluster(signal_data: dict) -> str:
         "country": signal.country,
         "severity": severity.value,
         "classification": classification.value,
-        "ai_assessment": f"Anomaly score {signal.anomaly_score:.2f}. Classification: {classification.value}.",
+        "ai_assessment": ai_assessment,
         "ai_summary": ai_summary,
         "spread_prediction": spread,
         "safety_advice": advice,
