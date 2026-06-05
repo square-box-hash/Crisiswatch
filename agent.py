@@ -203,7 +203,10 @@ Return plain text only.
 def process_cluster(signal_data: dict) -> str:
     """Main agent entry point — processes a detected cluster"""
     
-    signal = ClusterSignal(**signal_data)
+    signal_data_copy = {**signal_data}
+    signal_data_copy.setdefault("case_rate", 0.0)
+    signal_data_copy.setdefault("anomaly_score", 0.0)
+    signal = ClusterSignal(**signal_data_copy)
     signal.case_rate = (signal.cases / signal.population) * 100000
     
     history = get_outbreak_history(signal.disease, signal.region)
