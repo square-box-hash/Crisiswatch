@@ -12,6 +12,8 @@ import json
 import os
 from google import genai
 from google.genai import types
+from mcp_agent import run_mcp_agent_with_tools
+import asyncio
 
 # ─── GEMINI SETUP ───
 
