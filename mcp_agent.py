@@ -153,11 +153,20 @@ def execute_tool_call(tool_name: str, tool_args: dict, db) -> str:
             limit = tool_args.get("limit", 10)
             docs = list(collection.find(filter_query).limit(limit))
             # Convert ObjectId to string
-            for doc in docs:
-                if "_id" in doc:
-                    doc["_id"] = str(doc["_id"])
-            return json.dumps(docs)
-            
+            from bson import ObjectId
+            from datetime import datetime
+
+            def default_serializer(obj):
+                if isinstance(obj, ObjectId):
+                    return str(obj)
+                if isinstance(obj, datetime):
+                    return obj.isoformat()
+                raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
+
+            # Serialize the documents
+            docs_json = json.dumps(docs, default=default_serializer)
+            return docs_json
+
         elif tool_name == "insert_document":
             collection = db[tool_args["collection"]]
             document = json.loads(tool_args["document"])
