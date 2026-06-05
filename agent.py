@@ -57,7 +57,7 @@ def calculate_anomaly_score(signal: ClusterSignal, history: list) -> float:
     historical_rates = [
         h["cluster_signal"]["case_rate"] 
         for h in history 
-        if "cluster_signal" in h
+        if "cluster_signal" in h and "case_rate" in h["cluster_signal"]
     ]
     
     if not historical_rates:
@@ -211,6 +211,9 @@ def process_cluster(signal_data: dict) -> str:
     
     history = get_outbreak_history(signal.disease, signal.region)
     signal.anomaly_score = calculate_anomaly_score(signal, history)
+
+    signal_data["case_rate"] = signal.case_rate
+    signal_data["anomaly_score"] = signal.anomaly_score
 
     mcp_result = None
     try:
