@@ -72,7 +72,7 @@ After completing all steps, return a JSON object with:
 
     try:
         response = _client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.1-flash-lite",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=AGENT_SYSTEM_PROMPT,
@@ -204,7 +204,7 @@ safety_advice (public, practitioner, ngo)
         iteration += 1
         
         response = _client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3.1-flash-lite",
             contents=messages,
             config=gtypes.GenerateContentConfig(
                 system_instruction=AGENT_SYSTEM_PROMPT,
