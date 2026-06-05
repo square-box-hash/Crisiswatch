@@ -225,7 +225,7 @@ def process_cluster(signal_data: dict) -> str:
 
     if mcp_result:
         try:
-            classification = OutbreakClassification(mcp_result.get("classification", "pending"))
+            classification = OutbreakClassification(mcp_result.get("classification", "pending").lower())
             severity = SeverityLevel(mcp_result.get("severity", "moderate").lower())
             spread = mcp_result.get("spread_prediction", {})
             advice_raw = mcp_result.get("safety_advice", {})
