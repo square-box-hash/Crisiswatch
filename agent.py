@@ -128,6 +128,7 @@ def process_cluster(signal_data: dict):
 
     Kept only for backward compatibility.
     """
+    incident_id = str(ObjectId())  # or uuid if you prefer
 
     return {
         "status": "deprecated",
