@@ -1,11 +1,15 @@
-from db import outbreaks, health_workers, update_alert_version
-from models import OutbreakClassification, SeverityLevel
+from db import outbreaks, health_workers
 from datetime import datetime, timezone
 from bson import ObjectId
-import json
+
+
+# ─────────────────────────────────────────────
+# Register Worker
+# ─────────────────────────────────────────────
 
 def register_worker(worker_data: dict) -> str:
-    """Register a health worker — verified status starts False"""
+    """Register a health worker — starts unverified"""
+
     worker = {
         "name": worker_data["name"],
         "credentials": worker_data["credentials"],
@@ -13,20 +17,33 @@ def register_worker(worker_data: dict) -> str:
         "country": worker_data["country"],
         "institution": worker_data["institution"],
         "specialty": worker_data["specialty"],
-        "verified": False,  # admin verifies manually
+        "verified": False,
         "joined_at": datetime.now(timezone.utc)
     }
+
     result = health_workers.insert_one(worker)
     print(f"Worker registered: {worker_data['name']} (pending verification)")
     return str(result.inserted_id)
 
+
+# ─────────────────────────────────────────────
+# Verify Worker (Admin)
+# ─────────────────────────────────────────────
+
 def verify_worker(worker_id: str) -> None:
-    """Admin verifies a health worker"""
+    """Admin verification step"""
+
     health_workers.update_one(
         {"_id": ObjectId(worker_id)},
         {"$set": {"verified": True}}
     )
+
     print(f"Worker {worker_id} verified")
+
+
+# ─────────────────────────────────────────────
+# Submit Worker Review
+# ─────────────────────────────────────────────
 
 def submit_worker_message(
     outbreak_id: str,
@@ -35,15 +52,14 @@ def submit_worker_message(
     classification_vote: str,
     severity_vote: str
 ) -> None:
-    """Worker submits review on an active outbreak alert"""
+    """Worker submits structured review"""
 
-    # Get worker details
     worker = health_workers.find_one({"_id": ObjectId(worker_id)})
+
     if not worker:
         print("Worker not found")
         return
 
-    # Build message object
     worker_message = {
         "worker_name": worker["name"],
         "credentials": worker["credentials"],
@@ -56,7 +72,6 @@ def submit_worker_message(
         "submitted_at": datetime.now(timezone.utc)
     }
 
-    # Push message to outbreak document
     outbreaks.update_one(
         {"_id": ObjectId(outbreak_id)},
         {
@@ -65,13 +80,23 @@ def submit_worker_message(
         }
     )
 
-    # Update AI summary based on worker input
-    update_ai_summary(outbreak_id)
-    print(f"Message submitted by {worker['name']} ({'verified' if worker['verified'] else 'unverified'})")
+    update_worker_consensus(outbreak_id)
 
-def update_ai_summary(outbreak_id: str) -> None:
-    """Rebuild AI summary from all worker messages — Gemini will do this for real"""
+    print(
+        f"Message submitted by {worker['name']} "
+        f"({'verified' if worker['verified'] else 'unverified'})"
+    )
+
+
+# ─────────────────────────────────────────────
+# Consensus Builder (IMPORTANT CHANGE)
+# ─────────────────────────────────────────────
+
+def update_worker_consensus(outbreak_id: str) -> None:
+    """Build consensus WITHOUT overriding AI outputs"""
+
     outbreak = outbreaks.find_one({"_id": ObjectId(outbreak_id)})
+
     if not outbreak:
         return
 
@@ -79,7 +104,6 @@ def update_ai_summary(outbreak_id: str) -> None:
     if not messages:
         return
 
-    # Count votes
     classification_votes = {}
     severity_votes = {}
     verified_count = 0
@@ -87,35 +111,48 @@ def update_ai_summary(outbreak_id: str) -> None:
     for msg in messages:
         cv = msg["classification_vote"]
         sv = msg["severity_vote"]
+
         classification_votes[cv] = classification_votes.get(cv, 0) + 1
         severity_votes[sv] = severity_votes.get(sv, 0) + 1
+
         if msg["verified"]:
             verified_count += 1
 
-    # Find consensus
+    # ── consensus results ──
     top_classification = max(classification_votes, key=classification_votes.get)
     top_severity = max(severity_votes, key=severity_votes.get)
 
-    # Build summary — Gemini will make this richer later
+    total_votes = len(messages)
+    agreement_strength = max(classification_votes.values()) / total_votes
+
     summary = (
-        f"{len(messages)} health worker(s) have reviewed this alert "
-        f"({verified_count} verified). "
+        f"{total_votes} health worker reviews collected. "
+        f"{verified_count} verified professionals contributed. "
         f"Consensus classification: {top_classification}. "
-        f"Consensus severity: {top_severity}."
+        f"Consensus severity: {top_severity}. "
+        f"Agreement strength: {agreement_strength:.2f}."
     )
 
-    # Update outbreak with new summary and consensus
+    # ─────────────────────────────────────────
+    # IMPORTANT: DO NOT overwrite AI fields
+    # ─────────────────────────────────────────
+
     outbreaks.update_one(
         {"_id": ObjectId(outbreak_id)},
         {
             "$set": {
-                "ai_summary": summary,
-                "classification": top_classification,
-                "severity": top_severity,
-                "version": outbreak["version"] + 1,
+                "worker_consensus": {
+                    "classification": top_classification,
+                    "severity": top_severity,
+                    "verified_votes": verified_count,
+                    "total_votes": total_votes,
+                    "agreement_strength": agreement_strength
+                },
+                "worker_summary": summary,
                 "updated_at": datetime.now(timezone.utc)
             }
         }
     )
-    print(f"Alert updated to version {outbreak['version'] + 1}")
-    print(f"Summary: {summary}")
+
+    print(f"Consensus updated for outbreak {outbreak_id}")
+    print(summary)

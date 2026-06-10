@@ -1,11 +1,11 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from db import outbreaks, health_workers
-from agent import process_cluster
-from worker import register_worker, verify_worker, submit_worker_message
+from datetime import datetime
 from bson import ObjectId
-from datetime import datetime, timezone
+
+from db import outbreaks, health_workers
+from worker import register_worker, verify_worker, submit_worker_message
+
 import json
 
 app = FastAPI(title="CrisisWatch API")
@@ -17,9 +17,12 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# ── helpers ──
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+
 def serialize(doc):
-    """Recursively convert ObjectId and datetime to JSON-safe types"""
+    """Convert Mongo + Python objects into JSON-safe format"""
     if isinstance(doc, list):
         return [serialize(i) for i in doc]
     if isinstance(doc, dict):
@@ -30,92 +33,158 @@ def serialize(doc):
         return doc.isoformat()
     return doc
 
-# ── Request models ──
-class ClusterInput(BaseModel):
-    disease: str
-    region: str
-    country: str
-    cases: int
-    deaths: int
-    population: int
-    trigger: str | None = None
-    source_urls: list[str] = []
 
-class WorkerInput(BaseModel):
-    name: str
-    credentials: str
-    license_number: str
-    country: str
-    institution: str
-    specialty: str
+def normalize_outbreak(doc: dict) -> dict:
+    """
+    Convert DB document → frontend-safe canonical format
+    (prevents schema drift issues)
+    """
+    return {
+        "incident_id": str(doc.get("_id")),
+        "disease": doc.get("disease"),
+        "country": doc.get("country"),
+        "region": doc.get("region"),
 
-class MessageInput(BaseModel):
-    worker_id: str
-    message: str
-    classification_vote: str
-    severity_vote: str
+        "cases": doc.get("estimated_cases"),
+        "deaths": doc.get("estimated_deaths"),
 
-# ── Endpoints ──
+        "population": doc.get("population"),
+
+        "severity": doc.get("severity"),
+        "spread_risk": doc.get("spread_risk"),
+
+        "lifecycle_stage": doc.get("lifecycle_stage"),
+
+        "claim_type": doc.get("claim_type"),
+
+        "confidence_score": doc.get("confidence_score"),
+
+        "trigger": doc.get("trigger"),
+
+        "source_urls": doc.get("source_urls", []),
+
+        "ai_summary": doc.get("ai_summary"),
+        "reasoning": doc.get("reasoning"),
+
+        "neighboring_mentions": doc.get("neighboring_mentions", []),
+
+        "created_at": doc.get("created_at"),
+        "updated_at": doc.get("updated_at"),
+    }
+
+
+# ─────────────────────────────────────────────
+# Root
+# ─────────────────────────────────────────────
 
 @app.get("/")
 def root():
     return {"status": "CrisisWatch online"}
 
+
+# ─────────────────────────────────────────────
+# Outbreaks
+# ─────────────────────────────────────────────
+
 @app.get("/outbreaks")
 def get_outbreaks():
-    """Get all active outbreaks — public feed"""
+    """Get latest outbreaks (frontend feed)"""
     docs = list(outbreaks.find(
         {},
         sort=[("updated_at", -1)],
         limit=20
     ))
-    return [serialize(d) for d in docs]
+
+    return [normalize_outbreak(d) for d in docs]
+
 
 @app.get("/outbreaks/{outbreak_id}")
 def get_outbreak(outbreak_id: str):
-    """Get single outbreak with full worker messages"""
+    """Get full outbreak detail"""
     doc = outbreaks.find_one({"_id": ObjectId(outbreak_id)})
+
     if not doc:
         raise HTTPException(status_code=404, detail="Outbreak not found")
+
     return serialize(doc)
 
+
+# ─────────────────────────────────────────────
+# NEW: Pipeline ingestion endpoint
+# ─────────────────────────────────────────────
+
 @app.post("/outbreaks/detect")
-def detect_outbreak(signal: ClusterInput):
-    """Agent entry point — process a new cluster signal"""
-    outbreak_id = process_cluster(signal.model_dump())
-    return {"outbreak_id": outbreak_id, "status": "alert_created"}
+def detect_outbreak(incident: dict):
+    """
+    Receives CanonicalIncident from pipeline
+    Stores directly into DB (no transformation logic here)
+    """
+
+    if not isinstance(incident, dict):
+        raise HTTPException(status_code=400, detail="Invalid incident format")
+
+    # basic validation safeguard
+    if "incident_id" not in incident:
+        raise HTTPException(status_code=400, detail="Missing incident_id")
+
+    incident = serialize(incident)
+
+    inserted = outbreaks.insert_one(incident)
+
+    return {
+        "outbreak_id": str(inserted.inserted_id),
+        "status": "stored"
+    }
+
+
+# ─────────────────────────────────────────────
+# Workers
+# ─────────────────────────────────────────────
 
 @app.post("/workers/register")
-def register(worker: WorkerInput):
-    """Register a new health worker"""
-    worker_id = register_worker(worker.model_dump())
+def register(worker: dict):
+    worker_id = register_worker(worker)
     return {"worker_id": worker_id, "status": "pending_verification"}
+
 
 @app.post("/workers/{worker_id}/verify")
 def verify(worker_id: str):
-    """Admin verifies a health worker"""
     verify_worker(worker_id)
     return {"status": "verified"}
 
+
 @app.post("/outbreaks/{outbreak_id}/review")
-def submit_review(outbreak_id: str, msg: MessageInput):
-    """Health worker submits review on an outbreak"""
+def submit_review(outbreak_id: str, msg: dict):
     submit_worker_message(
         outbreak_id=outbreak_id,
-        worker_id=msg.worker_id,
-        message=msg.message,
-        classification_vote=msg.classification_vote,
-        severity_vote=msg.severity_vote
+        worker_id=msg["worker_id"],
+        message=msg["message"],
+        classification_vote=msg["classification_vote"],
+        severity_vote=msg["severity_vote"]
     )
+
     return {"status": "review_submitted"}
+
+
+# ─────────────────────────────────────────────
+# Summary endpoint
+# ─────────────────────────────────────────────
 
 @app.get("/outbreaks/{outbreak_id}/summary")
 def get_summary(outbreak_id: str):
-    """Get current AI summary and worker consensus"""
+
     doc = outbreaks.find_one(
         {"_id": ObjectId(outbreak_id)},
-        {"ai_summary": 1, "version": 1, "classification": 1, "severity": 1, "worker_messages": 1}
+        {
+            "ai_summary": 1,
+            "version": 1,
+            "classification": 1,
+            "severity": 1,
+            "worker_messages": 1
+        }
     )
+
     if not doc:
         raise HTTPException(status_code=404, detail="Not found")
+
     return serialize(doc)

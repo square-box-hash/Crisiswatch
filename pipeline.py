@@ -1,52 +1,88 @@
 import asyncio
 import hashlib
+import json
 import logging
 import os
-import time
+import re
+from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 import feedparser
 import httpx
 from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
 
+from srag import SRag, SRagConfig
+
+# =============================================================================
+# CrisisWatch v3
+# Retrieval-Grounded Crisis Intelligence Pipeline
+# =============================================================================
+
 load_dotenv()
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [Pipeline] %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [Pipeline] %(message)s"
+)
+
 log = logging.getLogger(__name__)
 
-CRISISWATCH_API = os.getenv("CRISISWATCH_API", "https://crisiswatch-ohrl.onrender.com")
-SRAG_MCP_URL = os.getenv("SRAG_MCP_URL", "http://localhost:8000/mcp/sse")
+# =============================================================================
+# Environment
+# =============================================================================
 
-# ── Sources ──────────────────────────────────────────────────────────────────
+CRISISWATCH_API = os.getenv(
+    "CRISISWATCH_API",
+    "https://crisiswatch-ohrl.onrender.com"
+)
+
+GEMINI_API_URL = os.getenv("GEMINI_API_URL")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
+# =============================================================================
+# SRag Configuration
+# =============================================================================
+
+sr = SRag(
+    config=SRagConfig(
+        use_reranker=True,
+        use_playwright=True,
+        use_lexicon=True,
+        use_reputation=True,
+        use_quality_evaluator=True,
+        use_recency_ranking=True,
+        use_searxng=True,
+        recency_weight=0.55,
+        max_results=10,
+        chunk_size=256,
+        trace_timing=True,
+    )
+)
+
+# =============================================================================
+# Sources
+# =============================================================================
 
 FEEDS = {
-    "WHO DON": "https://www.who.int/rss-feeds/news-english.xml",
-    "ProMED":  "https://promedmail.org/rss/feed.php",
-    "ReliefWeb": "https://reliefweb.int/updates/rss.xml?primary_country=0&source=1600",
-}
+    "WHO DON":
+        "https://www.who.int/rss-feeds/news-english.xml",
 
-PUBMED_URL = (
-    "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    "?db=pubmed&term=outbreak+OR+epidemic+OR+disease+cluster"
-    "&sort=pub+date&retmax=10&retmode=json&datetype=pdat&reldate=2"
-)
+    "ProMED":
+        "https://promedmail.org/rss/feed.php",
+
+    "ReliefWeb":
+        "https://reliefweb.int/updates/rss.xml?primary_country=0&source=1600",
+}
 
 GDELT_URL = (
     "https://api.gdeltproject.org/api/v2/doc/doc"
-    "?query=disease+outbreak+epidemic&mode=artlist&maxrecords=25"
-    "&format=json&timespan=1d"
-)
-
-WHO_GHO_URL = (
-    "https://ghoapi.azureedge.net/api/WHOSIS_000001"  # cause-of-death indicator
-    "?$filter=TimeDim ge 2020&$top=50&$orderby=TimeDim desc"
-)
-
-CDC_SODA_URL = (
-    "https://data.cdc.gov/resource/9mfq-cb36.json"
-    "?$limit=20&$order=submission_date DESC"  # COVID surveillance as baseline
+    "?query=disease+outbreak+epidemic"
+    "&mode=artlist"
+    "&maxrecords=25"
+    "&format=json"
+    "&timespan=1d"
 )
 
 OPENMETEO_URL = (
@@ -56,295 +92,901 @@ OPENMETEO_URL = (
     "&forecast_days=7&timezone=auto"
 )
 
-# High-risk region climate coordinates for trigger correlation
+# =============================================================================
+# Climate Regions
+# =============================================================================
+
 CLIMATE_REGIONS = {
-    "DRC":         (-4.0,  21.7),
-    "Nigeria":     (9.0,   8.0),
-    "Bangladesh":  (23.7,  90.4),
-    "Ethiopia":    (9.0,   40.0),
-    "Uganda":      (1.3,   32.3),
-    "Kenya":       (0.0,   38.0),
-    "India":       (20.6,  79.0),
-    "Pakistan":    (30.4,  69.3),
-    "Yemen":       (15.55, 48.5),
-    "Haiti":       (18.97, -72.29),
+    "DRC": (-4.0, 21.7),
+    "Nigeria": (9.0, 8.0),
+    "Bangladesh": (23.7, 90.4),
+    "Ethiopia": (9.0, 40.0),
+    "Uganda": (1.3, 32.3),
+    "Kenya": (0.0, 38.0),
+    "India": (20.6, 79.0),
+    "Pakistan": (30.4, 69.3),
+    "Yemen": (15.55, 48.5),
+    "Haiti": (18.97, -72.29),
 }
 
-# ── Deduplication ─────────────────────────────────────────────────────────────
+# =============================================================================
+# Reputation Scores
+# =============================================================================
+
+SOURCE_REPUTATION = {
+    "WHO DON": 0.98,
+    "CDC": 0.96,
+    "ReliefWeb": 0.92,
+    "ProMED": 0.90,
+    "PubMed": 0.95,
+    "GDELT": 0.42,
+    "Unknown": 0.30,
+}
+
+# =============================================================================
+# Disease Keywords
+# =============================================================================
+
+DISEASE_KEYWORDS = {
+    "ebola": "Ebola",
+    "marburg": "Marburg",
+    "cholera": "Cholera",
+    "mpox": "Mpox",
+    "monkeypox": "Mpox",
+    "dengue": "Dengue",
+    "measles": "Measles",
+    "yellow fever": "Yellow Fever",
+    "lassa": "Lassa Fever",
+    "nipah": "Nipah",
+    "anthrax": "Anthrax",
+    "rift valley": "Rift Valley Fever",
+    "meningitis": "Meningitis",
+    "avian influenza": "Avian Influenza",
+    "h5n1": "Avian Influenza H5N1",
+}
+
+COUNTRY_KEYWORDS = [
+    "drc",
+    "democratic republic of congo",
+    "uganda",
+    "kenya",
+    "ethiopia",
+    "somalia",
+    "sudan",
+    "cameroon",
+    "chad",
+    "mali",
+    "niger",
+    "guinea",
+    "sierra leone",
+    "liberia",
+    "bangladesh",
+    "india",
+    "pakistan",
+    "indonesia",
+    "philippines",
+    "haiti",
+    "yemen",
+    "mozambique",
+    "tanzania",
+    "angola",
+    "zambia",
+    "nigeria",
+]
+
+# =============================================================================
+# Population
+# =============================================================================
+
+POP = {
+    "Nigeria": 220000000,
+    "DRC": 100000000,
+    "Ethiopia": 120000000,
+    "Kenya": 55000000,
+    "Uganda": 48000000,
+    "Bangladesh": 170000000,
+    "India": 1400000000,
+    "Pakistan": 230000000,
+    "Haiti": 11000000,
+    "Yemen": 34000000,
+}
+
+# =============================================================================
+# Runtime Memory
+# =============================================================================
 
 _seen_hashes: set[str] = set()
+
+# =============================================================================
+# Utility
+# =============================================================================
 
 def _hash(text: str) -> str:
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
+def normalize_country(country: str) -> str:
+
+    mapping = {
+        "drc": "DRC",
+        "democratic republic of congo": "DRC",
+    }
+
+    return mapping.get(
+        country.lower(),
+        country.title()
+    )
+
 def is_duplicate(title: str, source: str) -> bool:
+
     h = _hash(f"{source}:{title.lower().strip()}")
+
     if h in _seen_hashes:
         return True
+
     _seen_hashes.add(h)
     return False
 
-# ── Disease signal extraction ─────────────────────────────────────────────────
+def deduplicate_paragraphs(text: str) -> str:
 
-DISEASE_KEYWORDS = {
-    "ebola":    {"disease": "Ebola", "severity_hint": "critical"},
-    "marburg":  {"disease": "Marburg", "severity_hint": "critical"},
-    "cholera":  {"disease": "Cholera", "severity_hint": "moderate"},
-    "mpox":     {"disease": "Mpox", "severity_hint": "high"},
-    "monkeypox":{"disease": "Mpox", "severity_hint": "high"},
-    "plague":   {"disease": "Plague", "severity_hint": "high"},
-    "dengue":   {"disease": "Dengue", "severity_hint": "moderate"},
-    "measles":  {"disease": "Measles", "severity_hint": "moderate"},
-    "yellow fever": {"disease": "Yellow Fever", "severity_hint": "high"},
-    "lassa":    {"disease": "Lassa Fever", "severity_hint": "high"},
-    "nipah":    {"disease": "Nipah", "severity_hint": "critical"},
-    "anthrax":  {"disease": "Anthrax", "severity_hint": "high"},
-    "rift valley": {"disease": "Rift Valley Fever", "severity_hint": "high"},
-    "meningitis": {"disease": "Meningitis", "severity_hint": "high"},
-    "typhoid":  {"disease": "Typhoid", "severity_hint": "moderate"},
-    "avian influenza": {"disease": "Avian Influenza", "severity_hint": "high"},
-    "h5n1":     {"disease": "Avian Influenza H5N1", "severity_hint": "critical"},
-}
+    seen = set()
+    output = []
 
-COUNTRY_KEYWORDS = [
-    "nigeria", "drc", "congo", "kenya", "ethiopia", "uganda", "somalia",
-    "sudan", "cameroon", "chad", "mali", "niger", "guinea", "sierra leone",
-    "liberia", "bangladesh", "india", "pakistan", "indonesia", "philippines",
-    "haiti", "yemen", "mozambique", "tanzania", "angola", "zambia",
-]
+    for para in text.split("\n\n"):
 
-def extract_signal(title: str, summary: str, source: str) -> Optional[dict]:
-    """Extract a structured outbreak signal from a news item"""
-    text = f"{title} {summary}".lower()
+        p = para.strip()
 
-    disease = None
-    for keyword, meta in DISEASE_KEYWORDS.items():
-        if keyword in text:
-            disease = meta["disease"]
-            break
+        if not p:
+            continue
 
-    if not disease:
-        # Check for generic outbreak language
-        if not any(w in text for w in ["outbreak", "epidemic", "cluster", "cases reported", "surge"]):
-            return None
-        disease = "Unknown Pathogen"
+        if p in seen:
+            continue
 
-    # Extract country
-    country = "Unknown"
-    region = "Unknown"
+        seen.add(p)
+        output.append(p)
+
+    return "\n\n".join(output)
+
+def detect_disease(text: str) -> Optional[str]:
+
+    t = text.lower()
+
+    for keyword, disease in DISEASE_KEYWORDS.items():
+        if keyword in t:
+            return disease
+
+    return None
+
+def detect_country(text: str) -> Optional[str]:
+
+    t = text.lower()
+
     for c in COUNTRY_KEYWORDS:
-        if c in text:
-            country = c.title()
-            region = c.title()
-            break
 
-    # Rough case extraction
-    import re
-    cases_match = re.search(r"(\d+)\s+(?:confirmed\s+)?cases?", text)
-    deaths_match = re.search(r"(\d+)\s+deaths?", text)
-    cases = int(cases_match.group(1)) if cases_match else 10
-    deaths = int(deaths_match.group(1)) if deaths_match else 0
+        if f" {c} " in f" {t} ":
+            return normalize_country(c)
 
-    # Population lookup (rough)
-    POP = {
-        "Nigeria": 220000000, "Drc": 100000000, "Ethiopia": 120000000,
-        "Kenya": 55000000, "Uganda": 48000000, "Bangladesh": 170000000,
-        "India": 1400000000, "Pakistan": 230000000, "Haiti": 11000000,
-        "Yemen": 34000000, "Guinea": 13000000, "Sierra Leone": 8000000,
-    }
-    population = POP.get(country, 5000000)
+    return None
 
-    return {
-        "disease": disease,
-        "region": region,
-        "country": country,
-        "cases": cases,
-        "deaths": deaths,
-        "population": population,
-        "trigger": None,
-        "source_urls": [source],
-    }
+def disease_session_name(disease: str) -> str:
 
-# ── Fetchers ──────────────────────────────────────────────────────────────────
+    return (
+        f"disease_{disease.lower()}"
+        .replace(" ", "_")
+        .replace("-", "_")
+    )
 
-async def fetch_rss_signals(client: httpx.AsyncClient) -> list[dict]:
-    signals = []
-    for name, url in FEEDS.items():
+# =============================================================================
+# Discovery Layer
+# =============================================================================
+
+async def fetch_feed_candidates(
+    client: httpx.AsyncClient
+) -> list[dict]:
+
+    candidates = []
+
+    for source_name, url in FEEDS.items():
+
         try:
-            resp = await client.get(url, timeout=15)
+
+            resp = await client.get(url, timeout=20)
+
             feed = feedparser.parse(resp.text)
-            for entry in feed.entries[:10]:
+
+            for entry in feed.entries[:15]:
+
                 title = entry.get("title", "")
                 summary = entry.get("summary", "")
-                if is_duplicate(title, name):
-                    continue
-                signal = extract_signal(title, summary, url)
-                if signal:
-                    log.info(f"[{name}] Found: {signal['disease']} in {signal['country']}")
-                    signals.append(signal)
-        except Exception as e:
-            log.warning(f"[{name}] Feed error: {e}")
-    return signals
+                link = entry.get("link", url)
 
-async def fetch_gdelt_signals(client: httpx.AsyncClient) -> list[dict]:
-    signals = []
+                if is_duplicate(title, source_name):
+                    continue
+
+                combined = f"{title}\n{summary}"
+
+                disease = detect_disease(combined)
+
+                if not disease:
+                    continue
+
+                country = detect_country(combined)
+
+                if not country:
+                    continue
+
+                candidates.append({
+                    "title": title,
+                    "summary": summary,
+                    "url": link,
+                    "source_name": source_name,
+                    "disease": disease,
+                    "country": country,
+                })
+
+        except Exception as e:
+            log.warning(f"[{source_name}] Feed error: {e}")
+
+    return candidates
+
+async def fetch_gdelt_candidates(
+    client: httpx.AsyncClient
+) -> list[dict]:
+
+    candidates = []
+
     try:
-        resp = await client.get(GDELT_URL, timeout=15)
+
+        resp = await client.get(GDELT_URL, timeout=20)
+
         data = resp.json()
-        articles = data.get("articles", [])
-        for article in articles[:15]:
+
+        for article in data.get("articles", [])[:10]:
+
             title = article.get("title", "")
             url = article.get("url", "")
+
             if is_duplicate(title, "GDELT"):
                 continue
-            signal = extract_signal(title, "", url)
-            if signal and signal["disease"] != "Unknown Pathogen":
-                log.info(f"[GDELT] Found: {signal['disease']} in {signal['country']}")
-                signals.append(signal)
+
+            disease = detect_disease(title)
+
+            if not disease:
+                continue
+
+            country = detect_country(title)
+
+            if not country:
+                continue
+
+            candidates.append({
+                "title": title,
+                "summary": "",
+                "url": url,
+                "source_name": "GDELT",
+                "disease": disease,
+                "country": country,
+            })
+
     except Exception as e:
         log.warning(f"[GDELT] Error: {e}")
-    return signals
 
-async def fetch_climate_triggers(client: httpx.AsyncClient) -> dict[str, str]:
-    """Return regions with active climate triggers (heavy rain → cholera, etc.)"""
+    return candidates
+
+# =============================================================================
+# SRag Evidence Layer
+# =============================================================================
+
+async def acquire_evidence(candidate: dict) -> Optional[dict]:
+
+    try:
+
+        disease = candidate["disease"]
+        session = disease_session_name(disease)
+
+        log.info(
+            f"[SRag] Reading "
+            f"{candidate['disease']} / {candidate['country']}"
+        )
+
+        # ---------------------------------------------------------------------
+        # Full article acquisition
+        # ---------------------------------------------------------------------
+
+        read_result = await sr.read(candidate["url"])
+
+        raw_text = ""
+
+        if hasattr(read_result, "content"):
+            raw_text = read_result.content
+        else:
+            raw_text = str(read_result)
+
+        if not raw_text:
+            return None
+
+        cleaned_text = deduplicate_paragraphs(raw_text)
+
+        # ---------------------------------------------------------------------
+        # Index evidence into SRag memory
+        # ---------------------------------------------------------------------
+
+        await sr.ingest_text(
+            text=cleaned_text,
+            metadata={
+                "disease": disease,
+                "country": candidate["country"],
+                "source_name": candidate["source_name"],
+                "url": candidate["url"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            },
+            session=session
+        )
+
+        # ---------------------------------------------------------------------
+        # Verification
+        # ---------------------------------------------------------------------
+
+        verification = await sr.verify(
+            query=(
+                f"{disease} outbreak "
+                f"{candidate['country']} "
+                f"{datetime.utcnow().year}"
+            ),
+            session=session
+        )
+
+        # ---------------------------------------------------------------------
+        # Context construction
+        # ---------------------------------------------------------------------
+
+        context = await sr.context(
+            question=(
+                f"What is the current outbreak status "
+                f"of {disease} in {candidate['country']}?"
+            ),
+            session=session,
+            output_format="json"
+        )
+
+        return {
+            "candidate": candidate,
+            "raw_text": cleaned_text,
+            "verification": verification,
+            "context": context,
+            "session": session,
+        }
+
+    except Exception as e:
+
+        log.warning(
+            f"[Evidence] "
+            f"{candidate['disease']} "
+            f"{candidate['country']} "
+            f"failed: {e}"
+        )
+
+        return None
+
+# =============================================================================
+# Gemini Intelligence Layer
+# =============================================================================
+
+SYSTEM_PROMPT = """
+You are an epidemiological intelligence analyst.
+
+Your task:
+- analyze outbreak evidence
+- distinguish active outbreaks from preparedness
+- detect historical references
+- reconcile conflicting information
+- estimate confidence
+- identify primary affected country
+- estimate spread risk
+- determine operational lifecycle stage
+
+Rules:
+- use ONLY supplied evidence
+- avoid speculation
+- return STRICT JSON
+- do not include markdown
+
+Lifecycle stages:
+- emerging
+- suspected
+- confirmed
+- active
+- contained
+- resolved
+- historical
+
+Return schema:
+
+{
+  "outbreak_detected": bool,
+  "disease": str,
+  "primary_country": str,
+  "neighboring_mentions": [str],
+  "claim_type": str,
+  "lifecycle_stage": str,
+  "confidence": float,
+  "estimated_cases": int,
+  "estimated_deaths": int,
+  "spread_risk": str,
+  "summary": str,
+  "reasoning": str
+}
+"""
+
+async def synthesize_incident(
+    client: httpx.AsyncClient,
+    evidence: dict
+) -> Optional[dict]:
+
+    if not GEMINI_API_URL or not GEMINI_API_KEY:
+
+        log.warning(
+            "[Gemini] Missing GEMINI_API_URL or GEMINI_API_KEY"
+        )
+
+        return None
+
+    try:
+
+        payload = {
+            "system_prompt": SYSTEM_PROMPT,
+            "evidence": {
+                "candidate": evidence["candidate"],
+                "verification": str(evidence["verification"]),
+                "context": evidence["context"],
+                "raw_text": evidence["raw_text"][:12000],
+            }
+        }
+
+        resp = await client.post(
+            GEMINI_API_URL,
+            headers={
+                "Authorization": f"Bearer {GEMINI_API_KEY}"
+            },
+            json=payload,
+            timeout=120
+        )
+
+        if resp.status_code != 200:
+
+            log.warning(
+                f"[Gemini] API error {resp.status_code}"
+            )
+
+            return None
+
+        data = resp.json()
+
+        if isinstance(data, str):
+            data = json.loads(data)
+
+        return data
+
+    except Exception as e:
+
+        log.warning(f"[Gemini] Synthesis failed: {e}")
+
+        return None
+
+# =============================================================================
+# Climate Layer
+# =============================================================================
+
+async def fetch_climate_triggers(
+    client: httpx.AsyncClient
+) -> dict[str, str]:
+
     triggers = {}
+
     for region, (lat, lon) in CLIMATE_REGIONS.items():
+
         try:
-            url = OPENMETEO_URL.format(lat=lat, lon=lon)
-            resp = await client.get(url, timeout=10)
+
+            url = OPENMETEO_URL.format(
+                lat=lat,
+                lon=lon
+            )
+
+            resp = await client.get(url, timeout=15)
+
             data = resp.json()
+
             daily = data.get("daily", {})
-            precip = daily.get("precipitation_sum", [0])
+            precip = daily.get(
+                "precipitation_sum",
+                [0]
+            )
+
             max_precip = max(precip) if precip else 0
-            if max_precip > 30:  # >30mm/day = heavy rain = cholera/flood trigger
+
+            if max_precip > 30:
+
                 triggers[region] = "monsoon_flood"
-                log.info(f"[Climate] Heavy rain trigger: {region} ({max_precip}mm)")
+
+                log.info(
+                    f"[Climate] Trigger "
+                    f"{region} ({max_precip}mm)"
+                )
+
         except Exception as e:
-            log.warning(f"[Climate] {region} error: {e}")
+
+            log.warning(
+                f"[Climate] "
+                f"{region} failed: {e}"
+            )
+
     return triggers
 
-async def fetch_who_gho_signals(client: httpx.AsyncClient) -> list[dict]:
-    """Fetch WHO Global Health Observatory case data"""
-    signals = []
+# =============================================================================
+# Incident Builder
+# =============================================================================
+
+from models import (
+    CanonicalIncident,
+    SeverityLevel,
+    SpreadRisk,
+    OutbreakLifecycle,
+    ClaimType,
+    VerificationStatus
+)
+
+def build_canonical_incident(
+    synthesized: dict,
+    evidence: dict,
+    climate_triggers: dict[str, str]
+) -> Optional[CanonicalIncident]:
+
+    if not synthesized:
+        return None
+
+    if not synthesized.get("outbreak_detected"):
+        return None
+
+    disease = synthesized.get("disease")
+    country = synthesized.get("primary_country")
+
+    if not disease or not country:
+        return None
+
+    # ---------------------------
+    # Confidence calibration
+    # ---------------------------
+    confidence = float(synthesized.get("confidence", 0.5))
+
+    source_name = evidence["candidate"]["source_name"]
+
+    confidence *= SOURCE_REPUTATION.get(source_name, 0.30)
+
+    confidence = round(min(max(confidence, 0.05), 0.99), 3)
+
+    # ---------------------------
+    # Identity
+    # ---------------------------
+    incident_id = _hash(
+        f"{disease}:{country}:{datetime.utcnow().date()}"
+    )
+
+    # ---------------------------
+    # Enum-safe mappings (IMPORTANT)
+    # ---------------------------
     try:
-        resp = await client.get(WHO_GHO_URL, timeout=15)
-        data = resp.json()
-        for record in data.get("value", [])[:10]:
-            country = record.get("SpatialDim", "Unknown")
-            value = record.get("NumericValue", 0)
-            year = record.get("TimeDim", 2024)
-            if value and value > 1000 and year >= 2023:
-                signals.append({
-                    "disease": "Mortality Cluster",
-                    "region": country,
-                    "country": country,
-                    "cases": int(value),
-                    "deaths": int(value * 0.1),
-                    "population": 5000000,
-                    "trigger": None,
-                    "source_urls": [WHO_GHO_URL],
-                })
-    except Exception as e:
-        log.warning(f"[WHO GHO] Error: {e}")
-    return signals
+        lifecycle = OutbreakLifecycle(
+            synthesized.get("lifecycle_stage", "active")
+        )
+    except:
+        lifecycle = OutbreakLifecycle.ACTIVE
 
-# ── SRag indexing ─────────────────────────────────────────────────────────────
-
-async def index_to_srag(signal: dict, raw_text: str) -> None:
-    """Index signal context into SRag for future retrieval"""
     try:
-        from srag import SRag, SRagConfig
-        config = SRagConfig(
-            search_enabled=False,  # no web search, direct ingest
-            rerank_enabled=True,
+        claim_type = ClaimType(
+            synthesized.get("claim_type", "official")
         )
-        rag = SRag(config=config)
-        await rag.ingest_text(
-            text=raw_text,
-            metadata={
-                "source": "pipeline",
-                "disease": signal["disease"],
-                "country": signal["country"],
-                "ingested_at": datetime.now(timezone.utc).isoformat(),
-            }
-        )
-        log.info(f"[SRag] Indexed: {signal['disease']} / {signal['country']}")
-    except Exception as e:
-        log.warning(f"[SRag] Index error: {e}")
+    except:
+        claim_type = ClaimType.OFFICIAL
 
-# ── Main pipeline run ─────────────────────────────────────────────────────────
+    try:
+        spread_risk = SpreadRisk(
+            synthesized.get("spread_risk", "moderate")
+        )
+    except:
+        spread_risk = SpreadRisk.MODERATE
+
+    # ---------------------------
+    # Build Canonical Object
+    # ---------------------------
+    return CanonicalIncident(
+        incident_id=incident_id,
+
+        disease=disease,
+        region=country,
+        country=country,
+
+        population=POP.get(country, 10_000_000),
+
+        estimated_cases=int(synthesized.get("estimated_cases", 0)),
+        estimated_deaths=int(synthesized.get("estimated_deaths", 0)),
+
+        severity=SeverityLevel.MODERATE,  # can refine later
+
+        spread_risk=spread_risk,
+        lifecycle_stage=lifecycle,
+        claim_type=claim_type,
+
+        confidence_score=confidence,
+
+        verification_status=VerificationStatus.VERIFIED,
+
+        trigger=climate_triggers.get(country),
+
+        source_count=1,
+        source_urls=[evidence["candidate"]["url"]],
+
+        neighboring_mentions=synthesized.get("neighboring_mentions", []),
+
+        ai_summary=synthesized.get("summary", ""),
+        reasoning=synthesized.get("reasoning", ""),
+
+        evidence_session=evidence.get("session"),
+
+        metadata={}
+    )
+
+# =============================================================================
+# Incident Reconciliation
+# =============================================================================
+
+def reconcile_signals(
+    incidents: list[dict]
+) -> list[dict]:
+
+    grouped = defaultdict(list)
+
+    for incident in incidents:
+
+        key = (
+            incident["disease"],
+            incident["country"]
+        )
+
+        grouped[key].append(incident)
+
+    merged = []
+
+    for _, group in grouped.items():
+
+        group.sort(
+            key=lambda x: x["confidence"],
+            reverse=True
+        )
+
+        primary = group[0]
+
+        if len(group) > 1:
+
+            primary["confidence"] = round(
+                min(
+                    primary["confidence"] +
+                    (0.05 * (len(group) - 1)),
+                    0.99
+                ),
+                3
+            )
+
+            primary["source_urls"] = list({
+                u
+                for g in group
+                for u in g["source_urls"]
+            })
+
+        merged.append(primary)
+
+    return merged
+
+# =============================================================================
+# Submission Layer
+# =============================================================================
+
+async def submit_incident(
+    client: httpx.AsyncClient,
+    incident: dict
+) -> bool:
+
+    try:
+
+        resp = await client.post(
+            f"{CRISISWATCH_API}/outbreaks/detect",
+            json=incident,
+            timeout=90
+        )
+
+        if resp.status_code == 200:
+
+            log.info(
+                f"✓ Submitted "
+                f"{incident['disease']} / "
+                f"{incident['country']} "
+                f"(conf={incident['confidence']})"
+            )
+
+            return True
+
+        log.warning(
+            f"[Submit] "
+            f"{resp.status_code} "
+            f"{incident['disease']}"
+        )
+
+        return False
+
+    except Exception as e:
+
+        log.warning(f"[Submit] Failed: {e}")
+
+        return False
+
+# =============================================================================
+# Main Pipeline
+# =============================================================================
 
 async def run_pipeline():
-    log.info("── Pipeline run starting ──")
-    
+
+    log.info(
+        "── CrisisWatch v3 pipeline starting ──"
+    )
+
     async with httpx.AsyncClient(
-        headers={"User-Agent": "CrisisWatch/1.0 (public health surveillance)"},
+        headers={
+            "User-Agent":
+            "CrisisWatch/3.0 "
+            "(retrieval-grounded epidemic intelligence)"
+        },
         follow_redirects=True
     ) as client:
 
-        # Fetch from all sources concurrently
-        rss_task      = fetch_rss_signals(client)
-        gdelt_task    = fetch_gdelt_signals(client)
-        climate_task  = fetch_climate_triggers(client)
-        gho_task      = fetch_who_gho_signals(client)
+        # ---------------------------------------------------------------------
+        # Discovery
+        # ---------------------------------------------------------------------
 
-        rss_signals, gdelt_signals, climate_triggers, gho_signals = await asyncio.gather(
-            rss_task, gdelt_task, climate_task, gho_task,
+        rss_task = fetch_feed_candidates(client)
+        gdelt_task = fetch_gdelt_candidates(client)
+        climate_task = fetch_climate_triggers(client)
+
+        rss_candidates, gdelt_candidates, climate_triggers = await asyncio.gather(
+            rss_task,
+            gdelt_task,
+            climate_task,
             return_exceptions=True
         )
 
-        # Flatten signals
-        all_signals = []
-        for result in [rss_signals, gdelt_signals, gho_signals]:
-            if isinstance(result, list):
-                all_signals.extend([
-                    s for s in result
-                    if s["disease"] != "Unknown Pathogen"   and s["country"] != "Unknown" # filter out generic signals
-                ])
+        candidates = []
 
-        if isinstance(climate_triggers, dict):
-            # Apply climate triggers to signals
-            for signal in all_signals:
-                if signal["country"] in climate_triggers:
-                    signal["trigger"] = climate_triggers[signal["country"]]
+        if isinstance(rss_candidates, list):
+            candidates.extend(rss_candidates)
 
-        log.info(f"Total new signals found: {len(all_signals)}")
+        if isinstance(gdelt_candidates, list):
+            candidates.extend(gdelt_candidates)
 
-        # Submit each signal to CrisisWatch API
+        log.info(
+            f"[Discovery] "
+            f"{len(candidates)} candidates"
+        )
+
+        # ---------------------------------------------------------------------
+        # Evidence Acquisition
+        # ---------------------------------------------------------------------
+
+        evidence_objects = []
+
+        for candidate in candidates:
+
+            evidence = await acquire_evidence(candidate)
+
+            if evidence:
+                evidence_objects.append(evidence)
+
+            await asyncio.sleep(1)
+
+        log.info(
+            f"[Evidence] "
+            f"{len(evidence_objects)} evidence packets"
+        )
+
+        # ---------------------------------------------------------------------
+        # Gemini Synthesis
+        # ---------------------------------------------------------------------
+
+        synthesized_incidents = []
+
+        for evidence in evidence_objects:
+
+            synthesized = await synthesize_incident(
+                client,
+                evidence
+            )
+
+            incident = build_canonical_incident(
+                synthesized,
+                evidence,
+                climate_triggers if isinstance(
+                    climate_triggers,
+                    dict
+                ) else {}
+            )
+
+            if not incident:
+                continue
+
+            if incident["confidence"] < 0.35:
+                continue
+
+            synthesized_incidents.append(incident)
+
+            # Gemini rate safety
+            await asyncio.sleep(2)
+
+        # ---------------------------------------------------------------------
+        # Reconciliation
+        # ---------------------------------------------------------------------
+
+        synthesized_incidents = reconcile_signals(
+            synthesized_incidents
+        )
+
+        log.info(
+            f"[Reconciliation] "
+            f"{len(synthesized_incidents)} incidents"
+        )
+
+        # ---------------------------------------------------------------------
+        # Submission
+        # ---------------------------------------------------------------------
+
         submitted = 0
-        for signal in all_signals:
-            try:
-                resp = await client.post(
-                    f"{CRISISWATCH_API}/outbreaks/detect",
-                    json=signal,
-                    timeout=60  # Gemini reasoning takes time
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    log.info(f"✓ Alert created: {data.get('outbreak_id')} — {signal['disease']} / {signal['country']}")
-                    submitted += 1
 
-                    # Index to SRag
-                    raw_text = f"{signal['disease']} outbreak in {signal['region']}, {signal['country']}. Cases: {signal['cases']}, Deaths: {signal['deaths']}."
-                    await index_to_srag(signal, raw_text)
+        for incident in synthesized_incidents:
 
-                    # Rate limit — don't hammer Gemini
-                    await asyncio.sleep(3)
-                else:
-                    log.warning(f"✗ API error {resp.status_code}: {signal['disease']}")
-            except Exception as e:
-                log.warning(f"✗ Submit error: {e}")
+            ok = await submit_incident(
+                client,
+                incident.to_dict()
+            )
 
-        log.info(f"── Pipeline run complete: {submitted}/{len(all_signals)} submitted ──")
+            if ok:
+                submitted += 1
+
+        log.info(f"── Pipeline complete {success}/{len(synthesized_incidents)} (failed={failed}) ──")
+
+# =============================================================================
+# Scheduler
+# =============================================================================
 
 def run():
     asyncio.run(run_pipeline())
 
 if __name__ == "__main__":
-    scheduler = BlockingScheduler(timezone="UTC")
-    scheduler.add_job(run, "interval", minutes=30, next_run_time=datetime.now(timezone.utc))
-    log.info("CrisisWatch pipeline scheduler started — running every 30 minutes")
+
+    scheduler = BlockingScheduler(
+        timezone="UTC"
+    )
+
+    scheduler.add_job(
+        run,
+        "interval",
+        minutes=30,
+        next_run_time=datetime.now(
+            timezone.utc
+        )
+    )
+
+    log.info(
+        "CrisisWatch v3 scheduler started "
+        "— every 30 minutes"
+    )
+
     try:
         scheduler.start()
+
     except KeyboardInterrupt:
         log.info("Pipeline stopped.")
