@@ -588,7 +588,7 @@ def derive_severity(spread_risk, lifecycle, cases, deaths, population):
     cases_per_million = (cases / population) * 1_000_000
     deaths_per_million = (deaths / population) * 1_000_000
 
-    if spread_risk == SpreadRisk.CRITICAL or deaths_per_million > 5:
+    if spread_risk == SpreadRisk.EXTREME or deaths_per_million > 5:
         return SeverityLevel.CRITICAL
 
     if (
