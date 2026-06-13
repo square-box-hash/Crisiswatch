@@ -843,6 +843,9 @@ async def run_pipeline():
             f"{submitted}/{len(incidents)} submitted ──"
         )
 
+def run_pipeline_sync():
+    asyncio.run(run_pipeline())
+
 # =============================================================================
 # Scheduler
 # =============================================================================

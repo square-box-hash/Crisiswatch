@@ -19,6 +19,20 @@ from datetime import datetime, timezone
 from google import genai
 from google.genai import types
 
+from fastapi import BackgroundTasks, Header, HTTPException
+from pipeline import run_pipeline_sync
+
+@app.post("/trigger-pipeline")
+async def trigger_pipeline(
+    background_tasks: BackgroundTasks,
+    x_cron_secret: str = Header(None)
+):
+    if x_cron_secret != os.environ.get("CRON_SECRET"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    background_tasks.add_task(run_pipeline_sync)
+    return {"status": "pipeline triggered"}
+
 # ─────────────────────────────────────────────
 # Gemini Setup (sandbox only)
 # ─────────────────────────────────────────────
