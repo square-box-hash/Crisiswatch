@@ -97,6 +97,25 @@ def get_outbreaks():
 
     return [normalize_outbreak(d) for d in docs]
 
+# ─────────────────────────────────────────────
+# Pipeline Trigger (for UptimeRobot cron)
+# ─────────────────────────────────────────────
+
+import os
+from fastapi import BackgroundTasks, Query
+from pipeline import run_pipeline_sync
+
+@app.get("/trigger-pipeline")
+async def trigger_pipeline(
+    background_tasks: BackgroundTasks,
+    secret: str = Query(...)
+):
+    if secret != os.environ.get("CRON_SECRET"):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    background_tasks.add_task(run_pipeline_sync)
+    return {"status": "pipeline triggered"}
+
 
 @app.get("/outbreaks/{outbreak_id}")
 def get_outbreak(outbreak_id: str):
