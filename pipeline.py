@@ -7,7 +7,11 @@ import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
-from playwright.async_api import async_playwright
+try:
+    from playwright.async_api import async_playwright
+    PLAYWRIGHT_AVAILABLE = True
+except ImportError:
+    PLAYWRIGHT_AVAILABLE = False
 
 import httpx
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -215,6 +219,10 @@ def html_to_text(html: str, max_chars: int = 12_000) -> str:
 
 async def scrape_with_playwright(url: str, max_chars: int = 12000) -> Optional[str]:
     """For JS-rendered pages that httpx can't read properly."""
+    if not PLAYWRIGHT_AVAILABLE:
+        log.warning("[Playwright] Not available in this environment, skipping")
+        return None
+
     try:
         async with async_playwright() as p:
             browser = await p.chromium.launch(headless=True)
