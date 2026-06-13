@@ -22,12 +22,12 @@ from google.genai import types
 from fastapi import BackgroundTasks, Header, HTTPException
 from pipeline import run_pipeline_sync
 
-@app.post("/trigger-pipeline")
+@app.get("/trigger-pipeline")
 async def trigger_pipeline(
     background_tasks: BackgroundTasks,
-    x_cron_secret: str = Header(None)
+    secret: str = Query(...)
 ):
-    if x_cron_secret != os.environ.get("CRON_SECRET"):
+    if secret != os.environ.get("CRON_SECRET"):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     background_tasks.add_task(run_pipeline_sync)
