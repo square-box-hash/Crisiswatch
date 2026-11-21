@@ -127,3 +127,19 @@ def test_missing_mongo_uri_raises_a_clear_error(monkeypatch):
         store.upsert_incident(make_doc())
 
     assert "MONGODB_URI" in str(excinfo.value)
+
+
+def test_stale_runs_are_closed_out():
+    old = datetime.now(timezone.utc) - timedelta(hours=1)
+
+    db.pipeline_runs.insert_one(
+        {"status": "running", "started_at": old, "errors": []}
+    )
+    db.pipeline_runs.insert_one(
+        {"status": "running", "started_at": datetime.now(timezone.utc), "errors": []}
+    )
+
+    assert store.mark_stale_runs(minutes=15) == 1
+
+    statuses = [d["status"] for d in db.pipeline_runs.find({})]
+    assert sorted(statuses) == ["abandoned", "running"]

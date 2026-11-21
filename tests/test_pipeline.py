@@ -168,3 +168,31 @@ def test_different_outbreaks_are_not_merged():
     b = build_incident(item(disease="Cholera", primary_country="Zambia"), candidate(), {})
 
     assert len(reconcile([a, b])) == 2
+
+
+# ── A run that dies must be recorded, not left "running" ─────
+
+def test_run_failure_is_written_to_the_run_document(monkeypatch):
+    import asyncio
+    import mongomock
+    import db as db_module
+    import pipeline as pipeline_module
+
+    mongo = mongomock.MongoClient()["crisiswatch"]
+    monkeypatch.setattr(db_module, "outbreaks", mongo["outbreaks"])
+    monkeypatch.setattr(db_module, "pipeline_runs", mongo["pipeline_runs"])
+
+    def boom():
+        raise RuntimeError("index build failed")
+
+    monkeypatch.setattr(db_module, "ensure_indexes", boom)
+
+    summary = asyncio.run(pipeline_module.run_pipeline(dry_run=False))
+
+    assert summary["status"] == "failed"
+    assert any("index build failed" in e for e in summary["errors"])
+    assert "traceback" in summary
+
+    run = mongo["pipeline_runs"].find_one({})
+    assert run["status"] == "failed"
+    assert run["finished_at"] is not None

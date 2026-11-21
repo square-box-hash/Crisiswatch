@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Optional
@@ -322,17 +323,26 @@ async def run_pipeline(
 
     log.info(f"── CrisisWatch run starting (limit {limit} articles) ──")
 
-    if not dry_run:
-        db.ensure_indexes()
-        if init_client() is None:
-            summary["errors"].append("Gemini client unavailable — set GEMINI_API_KEY")
-            summary["status"] = "failed"
-            store.finish_run(run_id, summary)
-            return summary
-
-    client = make_client()
+    client = None
 
     try:
+        if not dry_run:
+            # Clear out runs left "running" by an instance that died mid-run.
+            stale = store.mark_stale_runs()
+            if stale:
+                log.info(f"[Runs] marked {stale} stale run(s) as abandoned")
+
+            db.ensure_indexes()
+
+            if init_client() is None:
+                summary["errors"].append(
+                    "Gemini client unavailable — set GEMINI_API_KEY"
+                )
+                summary["status"] = "failed"
+                return summary
+
+        client = make_client()
+
         # ── 1. Collect candidate articles from every source ──
         collected = await asyncio.gather(
             *[
@@ -460,8 +470,16 @@ async def run_pipeline(
                 "active outbreak (or every item fell below MIN_CONFIDENCE)."
             )
 
+    except Exception as exc:
+        # A run that dies must say so, not sit at "running" forever.
+        summary["status"] = "failed"
+        summary["errors"].append(f"{type(exc).__name__}: {exc}")
+        summary["traceback"] = traceback.format_exc()[-2000:]
+        log.exception("[Pipeline] run failed")
+
     finally:
-        await client.aclose()
+        if client is not None:
+            await client.aclose()
         summary["duration_s"] = round(
             (datetime.now(timezone.utc) - started).total_seconds(), 1
         )

@@ -9,7 +9,7 @@ document — it does not create a second copy.
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import db
@@ -155,6 +155,31 @@ def finish_run(run_id, summary: dict) -> None:
         {"_id": run_id},
         {"$set": {**summary, "finished_at": datetime.now(timezone.utc)}},
     )
+
+
+def mark_stale_runs(minutes: int = 15) -> int:
+    """A run whose process died stays "running" forever. Close those out."""
+
+    if db.pipeline_runs is None:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(minutes=minutes)
+
+    result = db.pipeline_runs.update_many(
+        {"status": "running", "started_at": {"$lt": cutoff}},
+        {
+            "$set": {"status": "abandoned", "finished_at": now},
+            "$push": {
+                "errors": (
+                    "run never reported completion — the instance restarted or "
+                    "died mid-run"
+                )
+            },
+        },
+    )
+
+    return result.modified_count
 
 
 def latest_run() -> Optional[dict]:
