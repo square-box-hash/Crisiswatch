@@ -94,6 +94,21 @@ GET /trigger-pipeline?secret=$CRON_SECRET
 
 ---
 
+## Upgrading an existing database
+
+Documents written by v4 have no `incident_key`, no `last_seen` and no
+`snapshots`, so the new API (which filters on `last_seen`) would not show them.
+Run the backfill once after deploying:
+
+```bash
+python scripts/migrate_v5.py          # dry count
+python scripts/migrate_v5.py --yes    # backfill, merge duplicates, create indexes
+```
+
+It is idempotent and merges rows that map to the same outbreak.
+
+---
+
 ## Is it actually live? Check these three things
 
 1. **`GET /health`** — `db_connected`, `gemini_key`, how many outbreaks are
