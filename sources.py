@@ -15,6 +15,7 @@ Every parser is a pure function so it can be tested without the network.
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -99,6 +100,18 @@ SOURCES = {
         "reputation": 0.72,
         "tier": "MEDIUM",
         "limit": 10,
+    },
+
+    # ── News corroboration (off by default: it is noisy and costs a Gemini
+    #    call per article). Enable with ENABLE_GDELT=1.
+    "GDELT": {
+        "kind": "articles",
+        "parser": "gdelt",
+        "url": "https://api.gdeltproject.org/api/v2/doc/doc",
+        "reputation": 0.42,
+        "tier": "LOW",
+        "limit": 6,
+        "enabled": bool(os.getenv("ENABLE_GDELT")),
     },
 
     # ── Listing pages (legacy: text straight to Gemini) ──
@@ -321,12 +334,55 @@ def parse_promed(raw: bytes, cfg: dict, limit: int) -> list[Candidate]:
     ]
 
 
+GDELT_QUERY = (
+    '(cholera OR ebola OR mpox OR measles OR dengue OR "yellow fever" OR polio '
+    'OR typhoid OR diphtheria OR "avian influenza" OR marburg) '
+    '(outbreak OR epidemic OR "cases reported")'
+)
+
+
+def parse_gdelt(payload: dict, cfg: dict, limit: int) -> list[Candidate]:
+    """GDELT DOC 2.0 artlist → news articles. Free, no key."""
+
+    out = []
+
+    for item in (payload or {}).get("articles", [])[:limit]:
+        url = item.get("url") or ""
+        if not url.startswith("http"):
+            continue
+
+        # seendate looks like 20261121T120000Z
+        published = None
+        raw_date = str(item.get("seendate") or "")
+        if len(raw_date) >= 15:
+            try:
+                published = datetime.strptime(raw_date, "%Y%m%dT%H%M%SZ").replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                published = None
+
+        out.append(
+            Candidate(
+                source_name="GDELT",
+                url=url,
+                title=(item.get("title") or "").strip(),
+                published_at=published,
+                reputation=cfg["reputation"],
+                tier=cfg["tier"],
+            )
+        )
+
+    return out
+
+
 PARSERS = {
     "who_don": parse_who_don,
     "ecdc": parse_ecdc,
     "rss": parse_rss,
     "reliefweb": parse_reliefweb,
     "promed": parse_promed,
+    "gdelt": parse_gdelt,
 }
 
 
@@ -350,6 +406,9 @@ def slug_hints(url: str) -> tuple[str, str]:
 
 async def collect_source(client, name: str, cfg: dict) -> list[Candidate]:
     """Fetch one source's index and return candidates. Never raises."""
+
+    if cfg.get("enabled") is False:
+        return []
 
     limit = int(cfg.get("limit", 10))
     kind = cfg.get("kind", "articles")
@@ -384,6 +443,20 @@ async def collect_source(client, name: str, cfg: dict) -> list[Candidate]:
             if not payload:
                 return []
             candidates = parse_reliefweb(payload, cfg, limit)
+
+        elif parser_name == "gdelt":
+            params = {
+                "query": GDELT_QUERY,
+                "mode": "artlist",
+                "maxrecords": limit,
+                "timespan": "2d",
+                "format": "json",
+                "sort": "hybridrel",
+            }
+            payload = await fetch_json(client, cfg["url"], params=params)
+            if not payload:
+                return []
+            candidates = parse_gdelt(payload, cfg, limit)
 
         elif parser_name in ("rss", "promed"):
             raw = await fetch_bytes(client, cfg["url"])

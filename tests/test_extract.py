@@ -90,7 +90,8 @@ def test_confidence_out_of_range_is_rejected():
     assert "confidence" in reason
 
 
-def test_none_case_count_is_zeroed_not_rejected():
+def test_none_case_count_stays_unknown_not_zero():
+    """A source that states no figure must not be recorded as 0 cases."""
     item = {
         "disease": "Cholera",
         "primary_country": "Zambia",
@@ -99,4 +100,16 @@ def test_none_case_count_is_zeroed_not_rejected():
     }
     ok, reason = validate_item(item)
     assert ok, reason
-    assert item["estimated_cases"] == 0
+    assert item["estimated_cases"] is None
+
+
+def test_string_case_count_is_still_rejected():
+    ok, _ = validate_item(
+        {
+            "disease": "Cholera",
+            "primary_country": "Zambia",
+            "estimated_cases": "about 40",
+            "confidence": 0.6,
+        }
+    )
+    assert not ok

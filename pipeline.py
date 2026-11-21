@@ -19,6 +19,7 @@ import logging
 import os
 import traceback
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,8 +30,11 @@ import sources
 import store
 from extract import extract_from_candidate, init_client
 from fetch import fetch_page, gather_limited, make_client
+import assess
+import synthesis
 from models import (
     CanonicalIncident,
+    Evidence,
     OutbreakLifecycle,
     SeverityLevel,
     SpreadRisk,
@@ -135,6 +139,8 @@ def derive_severity(
 ) -> SeverityLevel:
 
     population = population or 10_000_000
+    cases = cases or 0
+    deaths = deaths or 0
     cases_per_million = (cases / population) * 1_000_000
     deaths_per_million = (deaths / population) * 1_000_000
 
@@ -186,8 +192,12 @@ def build_incident(
     if not disease or not country:
         return None
 
-    cases = int(item.get("estimated_cases") or 0)
-    deaths = int(item.get("estimated_deaths") or 0)
+    # None means "no source stated a figure". It is not zero.
+    raw_cases = item.get("estimated_cases")
+    raw_deaths = item.get("estimated_deaths")
+
+    cases = int(raw_cases) if raw_cases is not None else None
+    deaths = int(raw_deaths) if raw_deaths is not None else None
 
     lifecycle = coerce_lifecycle(item.get("lifecycle_stage"))
     claim_type = coerce_claim_type(item.get("claim_type"))
@@ -202,6 +212,19 @@ def build_incident(
     severity = derive_severity(spread_risk, lifecycle, cases, deaths, population)
 
     key = store.incident_key(disease, country)
+
+    evidence = [
+        Evidence(
+            source_name=candidate.source_name,
+            url=candidate.url,
+            tier=candidate.tier,
+            published_at=candidate.published_at,
+            cases=cases,
+            deaths=deaths,
+            confidence=confidence,
+            excerpt=(getattr(candidate, "text", "") or "")[:1200],
+        )
+    ]
 
     return CanonicalIncident(
         incident_id=key,
@@ -218,6 +241,8 @@ def build_incident(
         claim_type=claim_type,
         confidence_score=confidence,
         verification_status=VerificationStatus.UNVERIFIED,
+        cases_unknown=cases is None,
+        evidence=evidence,
         trigger=climate_triggers.get(country),
         source_count=1,
         source_urls=[candidate.url],
@@ -252,17 +277,28 @@ def reconcile(incidents: list) -> list:
             primary.confidence_score = round(
                 min(primary.confidence_score + 0.05 * (len(group) - 1), 0.99), 3
             )
-            primary.source_urls = list(
-                {u for g in group for u in g.source_urls if u}
-            )
-            primary.source_names = list(
-                {n for g in group for n in g.source_names if n}
-            )
+
+            # Every source's claim, not just the winner's.
+            merged_evidence = []
+            for g in group:
+                merged_evidence.extend(g.evidence)
+
+            primary.evidence = merged_evidence
+            primary.source_urls = list({u for g in group for u in g.source_urls if u})
+            primary.source_names = list({n for g in group for n in g.source_names if n})
             primary.source_count = len(primary.source_urls)
 
-            # Take the highest case count reported for this outbreak.
-            primary.estimated_cases = max(g.estimated_cases for g in group)
-            primary.estimated_deaths = max(g.estimated_deaths for g in group)
+            # Figures come from assess: official sources first, never invented.
+            cases, deaths, source_url, _as_of = assess.best_counts(
+                assess.evidence_to_objects(merged_evidence)
+            )
+            primary.estimated_cases = cases
+            primary.estimated_deaths = deaths
+            primary.cases_source = source_url
+            primary.cases_unknown = cases is None
+            primary.status = assess.derive_status(
+                assess.evidence_to_objects(merged_evidence)
+            )
 
             primary.neighboring_mentions = list(
                 {c for g in group for c in g.neighboring_mentions}
@@ -501,6 +537,44 @@ async def run_pipeline(
         # ── 5. Merge across sources ──
         incidents = reconcile(incidents)
         log.info(f"[Reconcile] {len(incidents)} unique incident(s)")
+
+        # ── 5b. Cross-source synthesis ──
+        # Only worth a call when more than one source described the outbreak.
+        multi = [i for i in incidents if len(i.evidence) >= 2]
+
+        if multi:
+            synth_results = await gather_limited(
+                [
+                    synthesis.synthesise(
+                        i.disease,
+                        i.country,
+                        [asdict(e) for e in i.evidence],
+                    )
+                    for i in multi
+                ],
+                limit=GEMINI_CONCURRENCY,
+            )
+
+            for incident, result in zip(multi, synth_results):
+                if not result:
+                    continue
+
+                if result["summary"]:
+                    incident.ai_summary = result["summary"]
+                if result["reasoning"]:
+                    incident.reasoning = result["reasoning"]
+
+                incident.metadata = {
+                    **(incident.metadata or {}),
+                    "synthesis": {
+                        "agreement": result["agreement"],
+                        "contradictions": result["contradictions"],
+                        "same_event": result["same_event"],
+                        "confidence": result["confidence"],
+                    },
+                }
+
+            log.info(f"[Synthesis] reconciled {len(multi)} multi-source incident(s)")
 
         # ── 6. Persist ──
         for incident in incidents:

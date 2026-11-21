@@ -7,6 +7,7 @@ from bson.errors import InvalidId
 import os
 import re
 
+import assess
 import db
 import store
 from worker import register_worker, verify_worker, submit_worker_message
@@ -54,10 +55,32 @@ def normalize_outbreak(doc: dict) -> dict:
         "country": doc.get("country"),
         "region": doc.get("region"),
 
-        "cases": doc.get("estimated_cases") or 0,
-        "deaths": doc.get("estimated_deaths") or 0,
-        "peak_cases": doc.get("peak_cases") or doc.get("estimated_cases") or 0,
+        # None means "no source stated a figure" — the UI must show that as
+        # unknown, not as zero.
+        "cases": doc.get("estimated_cases"),
+        "deaths": doc.get("estimated_deaths"),
+        "cases_unknown": bool(doc.get("cases_unknown", doc.get("estimated_cases") is None)),
+        "cases_source": doc.get("cases_source"),
+        "cases_as_of": doc.get("cases_as_of"),
+        "peak_cases": doc.get("peak_cases"),
         "population": doc.get("population"),
+
+        "status": doc.get("status") or "signal",
+        "sources_agreeing": doc.get("sources_agreeing") or len(doc.get("source_names") or []),
+        "is_active": assess.is_active(doc.get("last_seen")),
+        "contradictions": ((doc.get("metadata") or {}).get("synthesis") or {}).get("contradictions", []),
+        "agreement": ((doc.get("metadata") or {}).get("synthesis") or {}).get("agreement"),
+        "evidence": [
+            {
+                "source_name": e.get("source_name"),
+                "url": e.get("url"),
+                "tier": e.get("tier"),
+                "published_at": e.get("published_at"),
+                "cases": e.get("cases"),
+                "deaths": e.get("deaths"),
+            }
+            for e in (doc.get("evidence") or [])
+        ],
 
         "severity": doc.get("severity") or "low",
         "spread_risk": doc.get("spread_risk"),
@@ -175,6 +198,7 @@ def get_outbreaks(
     region: Optional[str] = None,
     q: Optional[str] = None,
     severity: Optional[str] = None,
+    status: Optional[str] = None,
     limit: int = Query(50, ge=1, le=200),
 ):
     """Latest outbreaks, filterable. Every param here actually filters."""
@@ -200,6 +224,10 @@ def get_outbreaks(
         wanted = [s.strip().lower() for s in severity.split(",") if s.strip()]
         query["severity"] = {"$in": wanted}
 
+    if status and status.lower() not in ("all", ""):
+        wanted = [s.strip().lower() for s in status.split(",") if s.strip()]
+        query["status"] = {"$in": wanted}
+
     docs = list(collection.find(query).limit(limit * 3))
 
     # Severity first, then most recently seen.
@@ -224,14 +252,17 @@ def get_stats():
     collection = _collection()
 
     counts = {"critical": 0, "high": 0, "moderate": 0, "low": 0}
+    by_status = {"confirmed": 0, "probable": 0, "suspected": 0, "signal": 0}
     total_cases = 0
     total_deaths = 0
+    unknown_counts = 0
     countries = set()
 
     for doc in collection.find(
         {},
         {
             "severity": 1,
+            "status": 1,
             "estimated_cases": 1,
             "estimated_deaths": 1,
             "country": 1,
@@ -240,16 +271,26 @@ def get_stats():
         key = str(doc.get("severity", "")).lower()
         if key in counts:
             counts[key] += 1
-        total_cases += int(doc.get("estimated_cases") or 0)
+        status_key = str(doc.get("status") or "").lower()
+        if status_key in by_status:
+            by_status[status_key] += 1
+
+        if doc.get("estimated_cases") is None:
+            unknown_counts += 1
+        else:
+            total_cases += int(doc.get("estimated_cases") or 0)
         total_deaths += int(doc.get("estimated_deaths") or 0)
+
         if doc.get("country"):
             countries.add(doc["country"])
 
     return {
         **counts,
         "total": sum(counts.values()),
+        "by_status": by_status,
         "cases": total_cases,
         "deaths": total_deaths,
+        "unknown_cases": unknown_counts,
         "countries": sorted(countries),
         "last_run": store.latest_run(),
     }

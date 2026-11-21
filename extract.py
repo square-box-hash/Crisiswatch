@@ -76,7 +76,10 @@ Step 2 — FILTER: drop anything historical, resolved, preparedness-only,
 Step 3 — DEDUPLICATE: if one outbreak covers several countries, emit ONE entry
          for the most affected country and list the rest in neighbouring_mentions.
 Step 4 — EXTRACT NUMBERS: use exact figures. "635 confirmed cases" → 635.
-         "dozens" → 40. "hundreds" → 200. If no number is given at all, use 0.
+         "dozens" → 40. "hundreds" → 200.
+         If the article states NO figure, return null. Never return 0 as a
+         stand-in for "unknown" — 0 means the source said zero, which is rare
+         and specific.
 Step 5 — CLASSIFY: lifecycle stage, spread risk, confidence, claim type.
 Step 6 — SUMMARISE: 2-3 sentences as if briefing a health minister.
 
@@ -92,6 +95,8 @@ HUMAN CASES ONLY
 EXACT NUMBERS
 - "635 confirmed cases" → 635 · "two deaths" → 2 · "dozens" → 40
 - Never return 0 when the article states a number.
+- No figure anywhere → null. A travel advisory that says "yellow fever is
+  present in Ghana" states no count: cases must be null, not 0.
 
 DISEASE NAME NORMALISATION
 - Bundibugyo virus → "Ebola (Bundibugyo)"
@@ -153,7 +158,7 @@ confirmed cases including 127 deaths. Uganda has reported imported cases."
 
 EXAMPLE 3 — vague text, no numbers
 "Cholera cases have been reported in Zambia following flooding."
-{"disease":"Cholera","primary_country":"Zambia","estimated_cases":0,
+{"disease":"Cholera","primary_country":"Zambia","estimated_cases":null,
  "spread_risk":"moderate","confidence":0.62,"lifecycle_stage":"emerging",
  "claim_type":"media","reasoning":"No case count given; flooding suggests risk."}
 
@@ -190,8 +195,8 @@ Each item:
   "claim_type": "official | media | rumor | unknown",
   "lifecycle_stage": "emerging | suspected | confirmed | active | contained | resolved | historical",
   "confidence": 0.0 to 1.0,
-  "estimated_cases": integer human cases only,
-  "estimated_deaths": integer human deaths only,
+  "estimated_cases": integer human cases, or null if no figure is stated,
+  "estimated_deaths": integer human deaths, or null if no figure is stated,
   "spread_risk": "low | moderate | high | critical",
   "summary": "2-3 sentence briefing for a health minister",
   "reasoning": "step by step, quoting the article"
@@ -285,9 +290,11 @@ def validate_item(item: dict) -> tuple[bool, str]:
         return False, f"country too long ({len(country)} chars)"
 
     for field_name in ("estimated_cases", "estimated_deaths"):
-        value = item.get(field_name, 0)
-        if value is None:
-            item[field_name] = 0
+        value = item.get(field_name)
+        # None / "" means the source stated no figure. That is not an error and
+        # it must stay None — turning it into 0 invents a fact.
+        if value is None or value == "":
+            item[field_name] = None
             continue
         try:
             number = int(value)
@@ -295,6 +302,7 @@ def validate_item(item: dict) -> tuple[bool, str]:
             return False, f"{field_name} not an integer: {value!r}"
         if number < 0 or number > 100_000_000:
             return False, f"{field_name} out of range: {number}"
+        item[field_name] = number
 
     try:
         confidence = float(item.get("confidence", 0.5))

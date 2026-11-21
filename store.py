@@ -2,9 +2,15 @@
 MongoDB persistence.
 
 One document per outbreak, keyed on `incident_key` (disease + country, no date
-in the key), with a `snapshots` array so the case count is tracked over time
-instead of being overwritten. Re-running the pipeline updates the same
-document — it does not create a second copy.
+in the key). Re-running the pipeline updates that document and appends one
+`snapshots` entry per day.
+
+Two rules this file enforces:
+
+  * a known case count is never replaced by "unknown" — a later advisory that
+    states no figure cannot erase the number WHO reported;
+  * every source claim is kept in `evidence`, so the status bucket and the
+    headline numbers can always be traced back to a URL.
 """
 
 import logging
@@ -12,11 +18,13 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import assess
 import db
 
 log = logging.getLogger(__name__)
 
 MAX_SNAPSHOTS = 90
+MAX_EVIDENCE = 40
 
 
 def _slug(value: str) -> str:
@@ -40,24 +48,26 @@ def _require_collection():
     return db.outbreaks
 
 
-def _snapshot(doc: dict, captured_at: datetime) -> dict:
+def _snapshot(fields: dict, captured_at: datetime) -> dict:
     return {
         "date": captured_at.strftime("%Y-%m-%d"),
-        "cases": int(doc.get("estimated_cases") or 0),
-        "deaths": int(doc.get("estimated_deaths") or 0),
-        "confidence": float(doc.get("confidence_score") or 0),
-        "severity": doc.get("severity") or "low",
-        "source_url": (doc.get("source_urls") or [""])[0],
+        # None means "no source stated a figure" — kept distinct from 0.
+        "cases": fields.get("estimated_cases"),
+        "deaths": fields.get("estimated_deaths"),
+        "status": fields.get("status"),
+        "confidence": float(fields.get("confidence_score") or 0),
+        "severity": fields.get("severity") or "low",
+        "source_url": fields.get("cases_source") or "",
         "captured_at": captured_at,
     }
 
 
 def upsert_incident(doc: dict, now: Optional[datetime] = None) -> dict:
     """
-    Insert or update one outbreak. Idempotent: running twice in a minute adds
-    one snapshot, not two.
+    Insert or update one outbreak. Idempotent.
 
-    Returns {"created", "updated", "snapshot_added", "cases_delta"}.
+    Returns {"created", "updated", "snapshot_added", "cases_delta",
+             "status", "cases_unknown"}.
     """
 
     collection = _require_collection()
@@ -68,33 +78,96 @@ def upsert_incident(doc: dict, now: Optional[datetime] = None) -> dict:
     )
     doc["incident_key"] = key
 
-    existing = collection.find_one(
-        {"incident_key": key},
-        {"snapshots": 1, "first_seen": 1, "peak_cases": 1, "estimated_cases": 1},
+    existing = collection.find_one({"incident_key": key})
+
+    # ── Merge evidence, then let it decide the figures ──
+    merged_evidence = assess.merge_evidence(
+        (existing or {}).get("evidence") or [],
+        doc.get("evidence") or [],
+    )[-MAX_EVIDENCE:]
+
+    if merged_evidence:
+        summary = assess.summarise_evidence(merged_evidence)
+    else:
+        # Caller posted a record with no source evidence (an external client,
+        # a manual entry). Trust what they sent rather than blanking it.
+        cases = doc.get("estimated_cases")
+        summary = {
+            "status": doc.get("status")
+            or ("suspected" if cases is not None else "signal"),
+            "cases": cases,
+            "deaths": doc.get("estimated_deaths"),
+            "cases_source": doc.get("cases_source"),
+            "cases_as_of": doc.get("cases_as_of"),
+            "cases_unknown": cases is None,
+            "sources_agreeing": int(doc.get("sources_agreeing") or 0),
+        }
+
+    # Never downgrade: an unknown figure must not replace a known one.
+    if summary["cases"] is None and existing and existing.get("estimated_cases") is not None:
+        summary["cases"] = existing.get("estimated_cases")
+        summary["cases_source"] = existing.get("cases_source")
+        summary["cases_as_of"] = existing.get("cases_as_of")
+        summary["cases_unknown"] = False
+
+    if summary["deaths"] is None and existing and existing.get("estimated_deaths") is not None:
+        summary["deaths"] = existing.get("estimated_deaths")
+
+    cases = summary["cases"]
+
+    fields = {
+        k: v
+        for k, v in doc.items()
+        if k not in ("_id", "snapshots", "first_seen", "evidence")
+    }
+
+    fields.update(
+        {
+            "evidence": merged_evidence,
+            "status": summary["status"],
+            "estimated_cases": cases,
+            "estimated_deaths": summary["deaths"],
+            "cases_source": summary["cases_source"],
+            "cases_as_of": summary["cases_as_of"],
+            "cases_unknown": summary["cases_unknown"],
+            "sources_agreeing": summary["sources_agreeing"],
+            "source_count": len(merged_evidence),
+            "source_urls": [e.get("url") for e in merged_evidence if e.get("url")],
+            "source_names": sorted(
+                {e.get("source_name") for e in merged_evidence if e.get("source_name")}
+            ),
+            "last_seen": now,
+            "updated_at": now,
+            "peak_cases": max(
+                int(cases or 0), int((existing or {}).get("peak_cases") or 0)
+            ),
+        }
     )
 
-    snap = _snapshot(doc, now)
-    cases = int(doc.get("estimated_cases") or 0)
-    peak = max(cases, int((existing or {}).get("peak_cases") or 0))
-
-    fields = {k: v for k, v in doc.items() if k not in ("_id", "snapshots", "first_seen")}
-    fields["last_seen"] = now
-    fields["updated_at"] = now
-    fields["peak_cases"] = peak
+    snap = _snapshot(fields, now)
 
     if existing is None:
         fields["first_seen"] = now
         fields["snapshots"] = [snap]
         collection.insert_one(fields)
-        log.info(f"[Store] new {doc.get('disease')} / {doc.get('country')} ({cases} cases)")
-        return {"created": True, "updated": False, "snapshot_added": True, "cases_delta": cases}
+        log.info(
+            f"[Store] new {fields.get('disease')} / {fields.get('country')} "
+            f"({_fmt(cases)} cases, {summary['status']})"
+        )
+        return {
+            "created": True,
+            "updated": False,
+            "snapshot_added": True,
+            "cases_delta": cases,
+            "status": summary["status"],
+            "cases_unknown": summary["cases_unknown"],
+        }
 
-    previous_cases = int(existing.get("estimated_cases") or 0)
+    previous_cases = existing.get("estimated_cases")
     previous_snaps = existing.get("snapshots") or []
 
     collection.update_one({"incident_key": key}, {"$set": fields})
 
-    # One snapshot per day: refresh today's entry if it exists, else append.
     same_day = [s for s in previous_snaps if s.get("date") == snap["date"]]
 
     if same_day:
@@ -112,17 +185,28 @@ def upsert_incident(doc: dict, now: Optional[datetime] = None) -> dict:
         )
         snapshot_added = True
 
+    delta = None
+    if isinstance(cases, int) and isinstance(previous_cases, int):
+        delta = cases - previous_cases
+
     log.info(
-        f"[Store] update {doc.get('disease')} / {doc.get('country')} "
-        f"({previous_cases} → {cases} cases)"
+        f"[Store] update {fields.get('disease')} / {fields.get('country')} "
+        f"({_fmt(previous_cases)} → {_fmt(cases)} cases, {summary['status']}, "
+        f"{summary['sources_agreeing']} source(s))"
     )
 
     return {
         "created": False,
         "updated": True,
         "snapshot_added": snapshot_added,
-        "cases_delta": cases - previous_cases,
+        "cases_delta": delta,
+        "status": summary["status"],
+        "cases_unknown": summary["cases_unknown"],
     }
+
+
+def _fmt(value) -> str:
+    return "unknown" if value is None else str(value)
 
 
 # =============================================================================

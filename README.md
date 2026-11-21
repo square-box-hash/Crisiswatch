@@ -151,7 +151,7 @@ endpoints answer 503 with that same message.
 |---|---|---|
 | GET | `/` | liveness |
 | GET | `/health` | DB, keys, counts, last run |
-| GET | `/outbreaks` | `?days=30&region=Zambia&q=cholera&severity=critical,high&limit=50` |
+| GET | `/outbreaks` | `?days=30&region=Zambia&q=cholera&severity=critical,high&status=confirmed&limit=50` |
 | GET | `/outbreaks/{id}` | full document incl. `snapshots` |
 | GET | `/outbreaks/{id}/summary` | AI summary + worker consensus |
 | GET | `/stats` | sidebar counts, totals, countries |
@@ -171,33 +171,76 @@ Severity is one vocabulary end to end: `low | moderate | high | critical`.
 
 ## Data model
 
+Counts are **tri-state**. `cases: null` means no source stated a figure — it is
+never rendered as 0, and a later report that states no figure cannot overwrite
+a number another source did state.
+
 ```json
 {
-  "incident_key": "cholera:zambia",
-  "disease": "Cholera",
-  "country": "Zambia",
-  "estimated_cases": 412,
-  "estimated_deaths": 11,
-  "peak_cases": 412,
-  "severity": "high",
-  "spread_risk": "high",
-  "lifecycle_stage": "active",
-  "claim_type": "official",
-  "confidence_score": 0.81,
-  "verification_status": "unverified",
-  "source_urls": ["https://www.who.int/..."],
-  "source_names": ["WHO DON"],
-  "first_seen": "2026-11-19T04:10:00Z",
-  "last_seen": "2026-11-21T04:10:00Z",
+  "incident_key": "ebola-bundibugyo:kenya",
+  "disease": "Ebola (Bundibugyo)",
+  "country": "Kenya",
+
+  "estimated_cases": 635,
+  "estimated_deaths": 127,
+  "cases_unknown": false,
+  "cases_source": "https://www.who.int/emergencies/disease-outbreak-news/item/...",
+  "cases_as_of": "2026-11-18T00:00:00Z",
+  "peak_cases": 635,
+
+  "status": "confirmed",
+  "sources_agreeing": 3,
+  "severity": "critical",
+
+  "evidence": [
+    { "source_name": "WHO DON", "url": "https://...", "tier": "HIGH",
+      "cases": 635, "deaths": 127, "published_at": "2026-11-18T00:00:00Z" },
+    { "source_name": "CDC Travel Notices", "url": "https://...", "tier": "HIGH",
+      "cases": null, "deaths": null }
+  ],
+
+  "metadata": {
+    "synthesis": {
+      "agreement": "partial",
+      "contradictions": ["WHO reports 635 cases; ReliefWeb reports 520."],
+      "confidence": 0.82
+    }
+  },
+
   "snapshots": [
-    { "date": "2026-11-19", "cases": 380, "deaths": 9 },
-    { "date": "2026-11-20", "cases": 400, "deaths": 10 },
-    { "date": "2026-11-21", "cases": 412, "deaths": 11 }
+    { "date": "2026-11-19", "cases": 600 },
+    { "date": "2026-11-21", "cases": 635 }
   ]
 }
 ```
 
----
+### Status — how sure, not how bad
+
+Derived from the evidence ledger, never from the model's opinion:
+
+| Status | Rule | Meaning |
+|---|---|---|
+| `confirmed` | ≥2 independent sources, ≥1 official, with a stated count | corroborated |
+| `probable` | 1 official source with a stated count | single authoritative report |
+| `suspected` | ≥2 sources, but no official count | exists, unquantified |
+| `signal` | 1 source, no count (a travel notice, a listing mention) | worth watching |
+
+`severity` answers "how bad"; `status` answers "how sure". `is_active` in the
+API response means the outbreak was seen in the last 14 days.
+
+### Cross-source synthesis
+
+When an outbreak has two or more pieces of evidence, one extra Gemini call
+reads them **together** and returns agreement, contradictions and a combined
+briefing. It may not invent figures: `synthesis.normalise_result()` drops any
+number whose source URL is not in the evidence set. Headline counts are chosen
+deterministically in `assess.py` (official sources first, highest stated
+figure), so every number in the record traces to a URL.
+
+### GDELT (optional)
+
+`ENABLE_GDELT=1` adds news articles as a low-reputation corroboration source.
+Off by default: it is noisy and costs one Gemini call per article.
 
 ## Tests
 

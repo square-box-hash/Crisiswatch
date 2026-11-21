@@ -56,6 +56,23 @@ class VerificationStatus(str, Enum):
     CONFLICTING = "conflicting"
 
 
+class OutbreakStatus(str, Enum):
+    """
+    How well corroborated a record is — independent of how bad the outbreak is.
+
+    confirmed: two or more independent sources, at least one official, and a
+               stated case count
+    probable:  one official source with a stated case count
+    suspected: sources exist but no stated count, or no official source
+    signal:    only advisories / listing pages — existence, no data
+    """
+
+    CONFIRMED = "confirmed"
+    PROBABLE = "probable"
+    SUSPECTED = "suspected"
+    SIGNAL = "signal"
+
+
 class AudienceType(str, Enum):
 
     PUBLIC = "public"
@@ -251,6 +268,24 @@ class WorkerReview:
 # =============================================================================
 
 @dataclass
+class Evidence:
+    """One source's claim about one outbreak. The audit trail."""
+
+    source_name: str
+    url: str
+
+    tier: str = "MEDIUM"
+    published_at: Optional[datetime] = None
+
+    # None means "this source did not state a figure" — not zero.
+    cases: Optional[int] = None
+    deaths: Optional[int] = None
+
+    confidence: float = 0.5
+    excerpt: str = ""
+
+
+@dataclass
 class CanonicalIncident:
 
     incident_id: str
@@ -263,9 +298,9 @@ class CanonicalIncident:
 
     population: int
 
-    estimated_cases: int
+    estimated_cases: Optional[int]
 
-    estimated_deaths: int
+    estimated_deaths: Optional[int]
 
     severity: SeverityLevel
 
@@ -281,6 +316,19 @@ class CanonicalIncident:
 
     # Stable identity across runs — disease+country, no date in the key.
     incident_key: str = ""
+
+    # How well corroborated this record is.
+    status: OutbreakStatus = OutbreakStatus.SUSPECTED
+
+    # True when no source stated a figure — the dashboard must not print 0.
+    cases_unknown: bool = True
+
+    # Where the headline numbers came from.
+    cases_source: Optional[str] = None
+    cases_as_of: Optional[datetime] = None
+
+    # Every source that mentioned it, with what each one claimed.
+    evidence: List[Evidence] = field(default_factory=list)
 
     trigger: Optional[str] = None
 

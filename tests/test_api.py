@@ -346,3 +346,105 @@ def test_trigger_wait_returns_the_summary(client, monkeypatch):
     assert body["triggered"] is True
     assert body["status"] == "ok"
     assert body["incidents_created"] == 3
+
+
+# ── Honest counts, status and evidence ──────────────────────
+
+def seed_with(evidence, cases=None, status="signal", disease="Typhoid Fever",
+              country="Senegal"):
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    db.outbreaks.insert_one(
+        {
+            "incident_key": f"{disease.lower()}:{country.lower()}",
+            "disease": disease,
+            "country": country,
+            "estimated_cases": cases,
+            "estimated_deaths": None,
+            "cases_unknown": cases is None,
+            "cases_source": evidence[0]["url"] if evidence else None,
+            "status": status,
+            "severity": "moderate",
+            "evidence": evidence,
+            "source_names": [e["source_name"] for e in evidence],
+            "source_urls": [e["url"] for e in evidence],
+            "sources_agreeing": len({e["source_name"] for e in evidence}),
+            "first_seen": now,
+            "last_seen": now,
+            "updated_at": now,
+            "snapshots": [{"date": "2026-11-21", "cases": cases}],
+        }
+    )
+
+
+def test_unknown_cases_are_null_not_zero(client):
+    seed_with(
+        [{"source_name": "CDC Travel Notices", "url": "https://cdc.gov/n",
+          "tier": "HIGH", "cases": None, "deaths": None}],
+        cases=None,
+    )
+
+    row = client.get("/outbreaks").json()[0]
+    assert row["cases"] is None
+    assert row["cases_unknown"] is True
+
+
+def test_stated_cases_are_returned_with_their_source(client):
+    seed_with(
+        [{"source_name": "WHO DON", "url": "https://who.int/don/1",
+          "tier": "HIGH", "cases": 412, "deaths": 7}],
+        cases=412,
+        status="probable",
+    )
+
+    row = client.get("/outbreaks").json()[0]
+    assert row["cases"] == 412
+    assert row["cases_unknown"] is False
+    assert row["cases_source"] == "https://who.int/don/1"
+    assert row["status"] == "probable"
+
+
+def test_status_filter(client):
+    seed_with([{"source_name": "WHO DON", "url": "https://who.int/a",
+                "tier": "HIGH", "cases": 10}], cases=10, status="probable")
+    seed_with([{"source_name": "CDC", "url": "https://cdc.gov/b",
+                "tier": "HIGH", "cases": None}], cases=None, status="signal",
+              disease="Measles", country="Yemen")
+
+    confirmed_only = client.get("/outbreaks?status=probable").json()
+    assert [r["disease"] for r in confirmed_only] == ["Typhoid Fever"]
+
+
+def test_detail_includes_the_evidence_ledger(client):
+    seed_with(
+        [
+            {"source_name": "WHO DON", "url": "https://who.int/don/1",
+             "tier": "HIGH", "cases": 412, "deaths": 7},
+            {"source_name": "ReliefWeb", "url": "https://reliefweb.int/r",
+             "tier": "HIGH", "cases": None, "deaths": None},
+        ],
+        cases=412,
+        status="confirmed",
+    )
+
+    incident_id = client.get("/outbreaks").json()[0]["incident_id"]
+    detail = client.get(f"/outbreaks/{incident_id}").json()
+
+    assert len(detail["evidence"]) == 2
+    assert {e["source_name"] for e in detail["evidence"]} == {"WHO DON", "ReliefWeb"}
+
+
+def test_stats_reports_status_buckets_and_unknown_counts(client):
+    seed_with([{"source_name": "WHO DON", "url": "https://who.int/a",
+                "tier": "HIGH", "cases": 100}], cases=100, status="probable")
+    seed_with([{"source_name": "CDC", "url": "https://cdc.gov/b",
+                "tier": "HIGH", "cases": None}], cases=None, status="signal",
+              disease="Measles", country="Yemen")
+
+    stats = client.get("/stats").json()
+
+    assert stats["by_status"]["probable"] == 1
+    assert stats["by_status"]["signal"] == 1
+    assert stats["unknown_cases"] == 1
+    assert stats["cases"] == 100

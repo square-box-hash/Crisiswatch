@@ -143,3 +143,92 @@ def test_stale_runs_are_closed_out():
 
     statuses = [d["status"] for d in db.pipeline_runs.find({})]
     assert sorted(statuses) == ["abandoned", "running"]
+
+
+# ── Evidence, provenance, and never downgrading a figure ────
+
+def ev_doc(cases, source="WHO DON", url="https://who.int/a", tier="HIGH"):
+    return {
+        "disease": "Ebola (Bundibugyo)",
+        "country": "Kenya",
+        "estimated_cases": cases,
+        "estimated_deaths": None,
+        "incident_key": store.incident_key("Ebola (Bundibugyo)", "Kenya"),
+        "evidence": [
+            {
+                "source_name": source,
+                "url": url,
+                "tier": tier,
+                "cases": cases,
+                "deaths": None,
+                "confidence": 0.9,
+                "published_at": None,
+                "excerpt": "text",
+            }
+        ],
+    }
+
+
+def test_a_stated_count_is_stored_with_its_source():
+    store.upsert_incident(ev_doc(635))
+
+    doc = db.outbreaks.find_one({})
+    assert doc["estimated_cases"] == 635
+    assert doc["cases_source"] == "https://who.int/a"
+    assert doc["cases_unknown"] is False
+    assert doc["status"] == "probable"
+    assert len(doc["evidence"]) == 1
+
+
+def test_an_unknown_later_report_does_not_erase_the_count():
+    store.upsert_incident(ev_doc(635))
+    store.upsert_incident(
+        {
+            "disease": "Ebola (Bundibugyo)",
+            "country": "Kenya",
+            "estimated_cases": None,
+            "incident_key": store.incident_key("Ebola (Bundibugyo)", "Kenya"),
+            "evidence": [
+                {
+                    "source_name": "CDC Travel Notices",
+                    "url": "https://cdc.gov/n",
+                    "tier": "HIGH",
+                    "cases": None,
+                    "deaths": None,
+                    "confidence": 0.8,
+                }
+            ],
+        }
+    )
+
+    doc = db.outbreaks.find_one({})
+    assert doc["estimated_cases"] == 635, "unknown must not overwrite a known figure"
+    assert doc["cases_unknown"] is False
+    assert len(doc["evidence"]) == 2
+
+
+def test_second_source_upgrades_status_to_confirmed():
+    store.upsert_incident(ev_doc(635))
+    store.upsert_incident(
+        {
+            "disease": "Ebola (Bundibugyo)",
+            "country": "Kenya",
+            "incident_key": store.incident_key("Ebola (Bundibugyo)", "Kenya"),
+            "evidence": [
+                {
+                    "source_name": "ReliefWeb",
+                    "url": "https://reliefweb.int/r",
+                    "tier": "HIGH",
+                    "cases": 640,
+                    "deaths": 127,
+                    "confidence": 0.85,
+                }
+            ],
+        }
+    )
+
+    doc = db.outbreaks.find_one({})
+    assert doc["status"] == "confirmed"
+    assert doc["sources_agreeing"] == 2
+    assert doc["estimated_cases"] == 640
+    assert doc["estimated_deaths"] == 127
