@@ -1,4 +1,4 @@
-from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -137,8 +137,10 @@ def root():
 
 
 @app.get("/health")
-def health():
+def health(response: Response):
     """What the dashboard (and you) can check when the feed looks static."""
+
+    response.headers["Cache-Control"] = "no-store, max-age=0"
 
     payload = {
         "status": "ok",
@@ -378,16 +380,31 @@ def delete_outbreak(
 
 @app.get("/trigger-pipeline")
 async def trigger_pipeline(
+    response: Response,
     background_tasks: BackgroundTasks,
     secret: Optional[str] = Query(None),
     x_cron_secret: Optional[str] = Header(None, alias="x-cron-secret"),
     limit: Optional[int] = None,
+    wait: bool = False,
 ):
-    """Cron entry point (UptimeRobot / Render cron)."""
+    """
+    Cron entry point (UptimeRobot / Render cron).
+
+    Default: queue the run and return immediately.
+    `&wait=true`: run it inside the request and return the summary — use this
+    when you need to see why a run produced nothing.
+    """
 
     _require_secret(secret, x_cron_secret)
 
-    from pipeline import run_pipeline_sync
+    # A GET that starts a job must never be served from a browser cache.
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+
+    from pipeline import run_pipeline, run_pipeline_sync
+
+    if wait:
+        summary = await run_pipeline(max_articles=limit)
+        return {"triggered": True, **summary}
 
     background_tasks.add_task(run_pipeline_sync, max_articles=limit)
 

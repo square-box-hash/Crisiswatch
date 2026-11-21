@@ -319,3 +319,30 @@ def test_admin_migrate_dry_run_writes_nothing(client):
     assert resp.status_code == 200
     assert resp.json()["dry_run"] is True
     assert "incident_key" not in db.outbreaks.find_one({})
+
+
+# ── Trigger endpoint: no caching, and wait=true reports inline ──
+
+def test_trigger_is_not_cacheable(client):
+    resp = client.get("/trigger-pipeline?secret=test-secret")
+    assert resp.status_code == 200
+    assert "no-store" in resp.headers["cache-control"]
+
+
+def test_health_is_not_cacheable(client):
+    assert "no-store" in client.get("/health").headers["cache-control"]
+
+
+def test_trigger_wait_returns_the_summary(client, monkeypatch):
+    import pipeline as pipeline_module
+
+    async def fake_run(max_articles=None):
+        return {"status": "ok", "incidents_created": 3, "errors": []}
+
+    monkeypatch.setattr(pipeline_module, "run_pipeline", fake_run)
+
+    body = client.get("/trigger-pipeline?secret=test-secret&wait=true").json()
+
+    assert body["triggered"] is True
+    assert body["status"] == "ok"
+    assert body["incidents_created"] == 3
