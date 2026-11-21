@@ -128,6 +128,13 @@ If a run produces nothing, the run document says which stage failed:
 | `Gemini client unavailable` | `GEMINI_API_KEY` missing or SDK not installed |
 | `Model not found` / `404` in errors | `GEMINI_MODEL` is not available to your key |
 | `429` / `RESOURCE_EXHAUSTED` | quota — lower `MAX_ARTICLES_PER_RUN` or `GEMINI_CONCURRENCY` |
+| `db_error: ... DNS query name does not exist` | the Atlas cluster in `MONGODB_URI` has been deleted or renamed. Create a cluster, copy the new connection string, update the env var |
+| `db_error: ... authentication failed` | wrong user/password in `MONGODB_URI`, or the password was never URL-encoded |
+| `db_error: ... timed out` | Atlas Network Access does not allow `0.0.0.0/0` |
+
+A dead database no longer stops the API from booting: it starts, `/health`
+returns 200 with `db_connected: false` and the reason in `db_error`, and data
+endpoints answer 503 with that same message.
 
 ---
 

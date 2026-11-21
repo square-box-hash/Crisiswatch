@@ -33,8 +33,9 @@ def incident_key(disease: str, country: str) -> str:
 def _require_collection():
     if db.outbreaks is None:
         raise RuntimeError(
-            "MONGODB_URI is not set — cannot persist. "
-            "Set it in .env, or run the pipeline with --dry-run."
+            db.connection_error()
+            or "MONGODB_URI is not set — cannot persist. "
+               "Set it in .env, or run the pipeline with --dry-run."
         )
     return db.outbreaks
 

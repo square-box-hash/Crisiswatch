@@ -230,3 +230,50 @@ def test_delete_removes_one_document(client):
     resp = client.delete(f"/outbreaks/{incident_id}?secret=test-secret")
     assert resp.status_code == 200
     assert db.outbreaks.count_documents({}) == 0
+
+
+# ── Database unreachable (the Render crash-loop case) ───────
+
+def test_api_boots_when_mongo_dns_fails(monkeypatch):
+    """A deleted Atlas cluster raises inside MongoClient's constructor.
+    That must not take the process down — /health has to be able to report it.
+    """
+    import importlib
+    import pymongo
+
+    message = (
+        "The DNS query name does not exist: "
+        "_mongodb._tcp.crisiswatch.ozntwfq.mongodb.net."
+    )
+
+    def boom(*args, **kwargs):
+        raise pymongo.errors.ConfigurationError(message)
+
+    monkeypatch.setenv("MONGODB_URI", "mongodb+srv://u:p@crisiswatch.ozntwfq.mongodb.net/")
+    monkeypatch.setattr(pymongo, "MongoClient", boom)
+
+    try:
+        importlib.reload(db)
+
+        assert db.client is None
+        assert db.outbreaks is None
+        assert "crisiswatch.ozntwfq.mongodb.net" in db.connection_error()
+
+        import importlib as _il
+        _il.reload(api)
+
+        client = TestClient(api.app)
+        health = client.get("/health")
+
+        assert health.status_code == 200
+        assert health.json()["db_connected"] is False
+        assert "does not exist" in health.json()["db_error"]
+        assert health.json()["status"] == "degraded"
+
+        # And a data endpoint explains itself instead of returning a bare 500.
+        assert client.get("/outbreaks").status_code == 503
+    finally:
+        monkeypatch.delenv("MONGODB_URI", raising=False)
+        monkeypatch.undo()
+        importlib.reload(db)
+        importlib.reload(api)

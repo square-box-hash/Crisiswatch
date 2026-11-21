@@ -9,7 +9,21 @@ load_dotenv()
 MONGODB_URI = os.getenv("MONGODB_URI")
 DB_NAME = os.getenv("MONGODB_DB", "crisiswatch")
 
-client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=8000) if MONGODB_URI else None
+# Constructing a MongoClient with a mongodb+srv:// URI does the DNS lookup
+# immediately, so a deleted cluster, a typo or an expired Atlas project raises
+# here — at import time, which takes the whole API down before it can answer a
+# single request. Catch it, keep the app bootable, and report the reason from
+# /health instead of crash-looping.
+CONNECTION_ERROR = None
+
+client = None
+
+if MONGODB_URI:
+    try:
+        client = MongoClient(MONGODB_URI, serverSelectionTimeoutMS=8000)
+    except Exception as exc:
+        CONNECTION_ERROR = f"{type(exc).__name__}: {exc}"
+        client = None
 
 db = client[DB_NAME] if client is not None else None
 
@@ -24,13 +38,24 @@ health_workers = db["health_workers"] if db is not None else None
 pipeline_runs = db["pipeline_runs"] if db is not None else None
 
 
+def connection_error() -> str | None:
+    """Why the client is unavailable, or None if it is up."""
+
+    if CONNECTION_ERROR:
+        return CONNECTION_ERROR
+    if not MONGODB_URI:
+        return "MONGODB_URI is not set"
+    return None
+
+
 def ping() -> bool:
     if client is None:
         return False
     try:
         client.admin.command("ping")
         return True
-    except Exception:
+    except Exception as exc:
+        globals()["CONNECTION_ERROR"] = f"{type(exc).__name__}: {exc}"
         return False
 
 

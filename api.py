@@ -113,7 +113,10 @@ def _require_secret(secret: Optional[str], header: Optional[str]) -> None:
 
 def _collection():
     if db.outbreaks is None:
-        raise HTTPException(status_code=503, detail="MONGODB_URI is not configured")
+        raise HTTPException(
+            status_code=503,
+            detail=db.connection_error() or "MONGODB_URI is not configured",
+        )
     return db.outbreaks
 
 
@@ -140,6 +143,7 @@ def health():
     payload = {
         "status": "ok",
         "db_connected": db.ping(),
+        "db_error": db.connection_error(),
         "outbreaks": 0,
         "last_run": None,
         "gemini_key": bool(os.getenv("GEMINI_API_KEY")),
@@ -153,6 +157,8 @@ def health():
 
     if not payload["db_connected"]:
         payload["status"] = "degraded"
+        if not payload["db_error"]:
+            payload["db_error"] = "MongoDB did not answer ping"
 
     return payload
 
