@@ -1,6 +1,24 @@
-from db import outbreaks, health_workers
 from datetime import datetime, timezone
 from bson import ObjectId
+from bson.errors import InvalidId
+import logging
+
+import db
+
+log = logging.getLogger(__name__)
+
+
+def _collections():
+    if db.outbreaks is None or db.health_workers is None:
+        raise RuntimeError("MONGODB_URI is not set — worker features need MongoDB")
+    return db.outbreaks, db.health_workers
+
+
+def _oid(value: str) -> ObjectId:
+    try:
+        return ObjectId(value)
+    except (InvalidId, TypeError):
+        raise ValueError(f"not a valid id: {value!r}")
 
 
 # ─────────────────────────────────────────────
@@ -9,6 +27,8 @@ from bson import ObjectId
 
 def register_worker(worker_data: dict) -> str:
     """Register a health worker — starts unverified"""
+
+    _, health_workers = _collections()
 
     worker = {
         "name": worker_data["name"],
@@ -22,7 +42,7 @@ def register_worker(worker_data: dict) -> str:
     }
 
     result = health_workers.insert_one(worker)
-    print(f"Worker registered: {worker_data['name']} (pending verification)")
+    log.info(f"Worker registered: {worker_data['name']} (pending verification)")
     return str(result.inserted_id)
 
 
@@ -33,12 +53,17 @@ def register_worker(worker_data: dict) -> str:
 def verify_worker(worker_id: str) -> None:
     """Admin verification step"""
 
-    health_workers.update_one(
-        {"_id": ObjectId(worker_id)},
+    _, health_workers = _collections()
+
+    result = health_workers.update_one(
+        {"_id": _oid(worker_id)},
         {"$set": {"verified": True}}
     )
 
-    print(f"Worker {worker_id} verified")
+    if result.matched_count == 0:
+        raise ValueError(f"worker not found: {worker_id}")
+
+    log.info(f"Worker {worker_id} verified")
 
 
 # ─────────────────────────────────────────────
@@ -54,11 +79,12 @@ def submit_worker_message(
 ) -> None:
     """Worker submits structured review"""
 
-    worker = health_workers.find_one({"_id": ObjectId(worker_id)})
+    outbreaks, health_workers = _collections()
+
+    worker = health_workers.find_one({"_id": _oid(worker_id)})
 
     if not worker:
-        print("Worker not found")
-        return
+        raise ValueError(f"worker not found: {worker_id}")
 
     worker_message = {
         "worker_name": worker["name"],
@@ -72,30 +98,35 @@ def submit_worker_message(
         "submitted_at": datetime.now(timezone.utc)
     }
 
-    outbreaks.update_one(
-        {"_id": ObjectId(outbreak_id)},
+    result = outbreaks.update_one(
+        {"_id": _oid(outbreak_id)},
         {
             "$push": {"worker_messages": worker_message},
             "$set": {"updated_at": datetime.now(timezone.utc)}
         }
     )
 
+    if result.matched_count == 0:
+        raise ValueError(f"outbreak not found: {outbreak_id}")
+
     update_worker_consensus(outbreak_id)
 
-    print(
+    log.info(
         f"Message submitted by {worker['name']} "
         f"({'verified' if worker['verified'] else 'unverified'})"
     )
 
 
 # ─────────────────────────────────────────────
-# Consensus Builder (IMPORTANT CHANGE)
+# Consensus Builder
 # ─────────────────────────────────────────────
 
 def update_worker_consensus(outbreak_id: str) -> None:
     """Build consensus WITHOUT overriding AI outputs"""
 
-    outbreak = outbreaks.find_one({"_id": ObjectId(outbreak_id)})
+    outbreaks, _ = _collections()
+
+    outbreak = outbreaks.find_one({"_id": _oid(outbreak_id)})
 
     if not outbreak:
         return
@@ -133,12 +164,9 @@ def update_worker_consensus(outbreak_id: str) -> None:
         f"Agreement strength: {agreement_strength:.2f}."
     )
 
-    # ─────────────────────────────────────────
     # IMPORTANT: DO NOT overwrite AI fields
-    # ─────────────────────────────────────────
-
     outbreaks.update_one(
-        {"_id": ObjectId(outbreak_id)},
+        {"_id": _oid(outbreak_id)},
         {
             "$set": {
                 "worker_consensus": {
@@ -154,5 +182,4 @@ def update_worker_consensus(outbreak_id: str) -> None:
         }
     )
 
-    print(f"Consensus updated for outbreak {outbreak_id}")
-    print(summary)
+    log.info(f"Consensus updated for outbreak {outbreak_id}: {summary}")

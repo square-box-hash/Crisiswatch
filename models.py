@@ -26,6 +26,8 @@ class ClaimType(str, Enum):
     MEDIA_REPORT = "media_report"
     FIELD_REPORT = "field_report"
     SCIENTIFIC = "scientific"
+    RUMOR = "rumor"
+    UNKNOWN = "unknown"
 
 
 class SeverityLevel(str, Enum):
@@ -41,7 +43,9 @@ class SpreadRisk(str, Enum):
     LOW = "low"
     MODERATE = "moderate"
     HIGH = "high"
-    EXTREME = "extreme"
+    CRITICAL = "critical"
+    # Kept as an alias so older stored documents and the v3 code keep working.
+    EXTREME = "critical"
 
 
 class VerificationStatus(str, Enum):
@@ -57,6 +61,83 @@ class AudienceType(str, Enum):
     PUBLIC = "public"
     PRACTITIONER = "practitioner"
     NGO = "ngo"
+
+
+# =============================================================================
+# Coercion — the prompt asks for free-text labels, so map them onto the enums
+# instead of letting a bare `except` swallow the difference.
+# =============================================================================
+
+def _norm(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
+CLAIM_TYPE_ALIASES = {
+    "official": ClaimType.OFFICIAL,
+    "official_report": ClaimType.OFFICIAL,
+    "government": ClaimType.OFFICIAL,
+    "who": ClaimType.OFFICIAL,
+    "media": ClaimType.MEDIA_REPORT,
+    "media_report": ClaimType.MEDIA_REPORT,
+    "news": ClaimType.MEDIA_REPORT,
+    "news_report": ClaimType.MEDIA_REPORT,
+    "rumor": ClaimType.RUMOR,
+    "rumour": ClaimType.RUMOR,
+    "unverified": ClaimType.RUMOR,
+    "social_media": ClaimType.RUMOR,
+    "field": ClaimType.FIELD_REPORT,
+    "field_report": ClaimType.FIELD_REPORT,
+    "worker_report": ClaimType.FIELD_REPORT,
+    "scientific": ClaimType.SCIENTIFIC,
+    "paper": ClaimType.SCIENTIFIC,
+    "peer_reviewed": ClaimType.SCIENTIFIC,
+    "suspected": ClaimType.SUSPECTED,
+    "unknown": ClaimType.UNKNOWN,
+    "": ClaimType.UNKNOWN,
+}
+
+
+def coerce_claim_type(value: Any) -> ClaimType:
+    key = _norm(value)
+    if key in CLAIM_TYPE_ALIASES:
+        return CLAIM_TYPE_ALIASES[key]
+    try:
+        return ClaimType(key)
+    except ValueError:
+        return ClaimType.UNKNOWN
+
+
+def coerce_spread_risk(value: Any) -> SpreadRisk:
+    key = _norm(value)
+    if key in ("extreme", "severe", "pandemic"):
+        return SpreadRisk.CRITICAL
+    try:
+        return SpreadRisk(key)
+    except ValueError:
+        return SpreadRisk.MODERATE
+
+
+def coerce_lifecycle(value: Any) -> OutbreakLifecycle:
+    key = _norm(value)
+    try:
+        return OutbreakLifecycle(key)
+    except ValueError:
+        return OutbreakLifecycle.ACTIVE
+
+
+def coerce_severity(value: Any) -> SeverityLevel:
+    key = _norm(value)
+    # The frontend used to speak in alert/advisory/monitoring; accept both.
+    if key in ("alert", "severe"):
+        return SeverityLevel.CRITICAL
+    if key in ("advisory", "warning"):
+        return SeverityLevel.HIGH
+    if key == "monitoring":
+        return SeverityLevel.MODERATE
+    try:
+        return SeverityLevel(key)
+    except ValueError:
+        return SeverityLevel.LOW
 
 
 # =============================================================================
@@ -198,11 +279,18 @@ class CanonicalIncident:
 
     verification_status: VerificationStatus
 
+    # Stable identity across runs — disease+country, no date in the key.
+    incident_key: str = ""
+
     trigger: Optional[str] = None
 
     source_count: int = 0
 
     source_urls: List[str] = field(
+        default_factory=list
+    )
+
+    source_names: List[str] = field(
         default_factory=list
     )
 
@@ -213,6 +301,8 @@ class CanonicalIncident:
     ai_summary: str = ""
 
     reasoning: str = ""
+
+    published_at: Optional[datetime] = None
 
     evidence_session: Optional[str] = None
 
@@ -237,3 +327,16 @@ class CanonicalIncident:
     def to_dict(self):
 
         return asdict(self)
+
+    def to_doc(self) -> dict:
+        """BSON-safe document, enums flattened to their string values."""
+
+        doc = {}
+
+        for key, value in asdict(self).items():
+            if isinstance(value, Enum):
+                doc[key] = value.value
+            else:
+                doc[key] = value
+
+        return doc

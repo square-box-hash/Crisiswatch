@@ -1,10 +1,12 @@
 .env
+.env.local
 venv/
+.venv/
 __pycache__/
 *.pyc
 *.pyo
-.env.local
+.pytest_cache/
 *.egg-info/
 dist/
 build/
-.pytest_cache/
+srag_db/
