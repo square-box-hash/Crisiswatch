@@ -564,7 +564,19 @@ async def run_pipeline(
                     limit=2,
                 )
 
+                attempted_at = datetime.now(timezone.utc)
+
                 for incident, extra in zip(thin, found):
+                    # Record the attempt either way, so a record that stays
+                    # unknown is not re-searched on the next run.
+                    incident.metadata = {
+                        **(incident.metadata or {}),
+                        "research": {
+                            "last_attempt": attempted_at,
+                            "found": len(extra or []),
+                        },
+                    }
+
                     if not extra:
                         continue
                     incident.evidence = list(incident.evidence) + extra

@@ -12,7 +12,7 @@ is subject to the same rules: a figure must come from a URL we actually read.
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
@@ -28,6 +28,10 @@ TAVILY_URL = "https://api.tavily.com/search"
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 MAX_RESEARCH_PER_RUN = int(os.getenv("MAX_RESEARCH_PER_RUN", "3"))
+# Don't re-search a record that was already looked at recently: a record that
+# stays unknown would otherwise burn credits on every run (48 runs/day at a
+# 30-minute schedule is 4,300 searches a month on a 1,000-credit plan).
+COOLDOWN_HOURS = int(os.getenv("RESEARCH_COOLDOWN_HOURS", "24"))
 PAGES_PER_INCIDENT = int(os.getenv("RESEARCH_PAGES", "3"))
 SEARCH_DEPTH = os.getenv("TAVILY_SEARCH_DEPTH", "basic")
 
@@ -80,8 +84,35 @@ def tier_for_url(url: str) -> tuple:
     return "LOW", 0.45
 
 
+def recently_researched(incident, hours: int = COOLDOWN_HOURS) -> bool:
+    """Has this record already had a search spent on it lately?"""
+
+    metadata = getattr(incident, "metadata", None) or {}
+    last = (metadata.get("research") or {}).get("last_attempt")
+
+    if not last:
+        return False
+
+    if isinstance(last, str):
+        try:
+            last = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+
+    if not isinstance(last, datetime):
+        return False
+
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+
+    return (datetime.now(timezone.utc) - last) < timedelta(hours=hours)
+
+
 def needs_research(incident) -> bool:
     """No stated figure, or only weakly corroborated — worth a search."""
+
+    if recently_researched(incident):
+        return False
 
     if incident.estimated_cases is None:
         return True

@@ -171,3 +171,45 @@ def test_research_returns_evidence_and_skips_known_urls(monkeypatch):
 def test_research_is_inert_without_a_key(monkeypatch):
     monkeypatch.setattr(research, "TAVILY_API_KEY", "")
     assert asyncio.run(research.research_incident(None, incident())) == []
+
+
+# ── Cooldown: don't re-search a record every run ────────────
+
+def test_recent_attempt_blocks_a_second_search():
+    from datetime import datetime, timedelta, timezone
+
+    recent = incident(cases=None)
+    recent.metadata = {
+        "research": {"last_attempt": datetime.now(timezone.utc) - timedelta(hours=2)}
+    }
+
+    assert research.recently_researched(recent) is True
+    assert research.needs_research(recent) is False
+
+
+def test_old_attempt_does_not_block():
+    from datetime import datetime, timedelta, timezone
+
+    stale = incident(cases=None)
+    stale.metadata = {
+        "research": {"last_attempt": datetime.now(timezone.utc) - timedelta(hours=30)}
+    }
+
+    assert research.recently_researched(stale) is False
+    assert research.needs_research(stale) is True
+
+
+def test_never_researched_is_not_blocked():
+    fresh = incident(cases=None)
+    fresh.metadata = {}
+
+    assert research.recently_researched(fresh) is False
+
+
+def test_naive_timestamps_from_mongo_do_not_crash():
+    from datetime import datetime
+
+    naive = incident(cases=None)
+    naive.metadata = {"research": {"last_attempt": datetime.utcnow()}}
+
+    assert research.recently_researched(naive) is True

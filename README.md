@@ -254,10 +254,18 @@ So a `signal` record can become `probable` or `confirmed` inside one run — but
 only because a new URL was actually read, never because the model was asked to
 guess.
 
-Cost: one search credit per record, plus one Gemini call per page. Defaults are
-`MAX_RESEARCH_PER_RUN=3` and `RESEARCH_PAGES=3`, so a run spends at most 3
-credits. The free plan is 1,000 credits/month and hard-stops when exhausted —
-it will not bill you.
+Cost: one search credit per record, plus one Gemini call per page.
+
+**Budget it deliberately.** A record that stays unknown would otherwise be
+re-searched on every run, and at a 30-minute schedule that is 48 runs a day —
+4,300 searches a month against a 1,000-credit free plan. Two guards prevent it:
+
+- `RESEARCH_COOLDOWN_HOURS=24` — a record searched in the last 24 hours is
+  skipped, whether or not the search found anything;
+- `MAX_RESEARCH_PER_RUN=2` — a hard cap per run.
+
+That works out to a handful of searches a day in steady state. The free plan
+hard-stops when credits run out; it will not bill you.
 
 Leave `TAVILY_API_KEY` empty to disable the whole step.
 
