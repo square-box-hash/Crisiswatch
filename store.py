@@ -157,6 +157,20 @@ def finish_run(run_id, summary: dict) -> None:
     )
 
 
+def active_run(minutes: int = 15) -> Optional[dict]:
+    """A run started recently and still marked running — don't start another."""
+
+    if db.pipeline_runs is None:
+        return None
+
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+
+    return db.pipeline_runs.find_one(
+        {"status": "running", "started_at": {"$gte": cutoff}},
+        sort=[("started_at", -1)],
+    )
+
+
 def mark_stale_runs(minutes: int = 15) -> int:
     """A run whose process died stays "running" forever. Close those out."""
 

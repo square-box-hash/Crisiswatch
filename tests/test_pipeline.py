@@ -196,3 +196,65 @@ def test_run_failure_is_written_to_the_run_document(monkeypatch):
     run = mongo["pipeline_runs"].find_one({})
     assert run["status"] == "failed"
     assert run["finished_at"] is not None
+
+
+# ── Fair selection across sources ────────────────────────────
+
+def test_selection_samples_every_source_even_with_a_small_cap():
+    import pipeline as pipeline_module
+    from sources import Candidate
+
+    def cand(name, url, dated):
+        return Candidate(
+            source_name=name,
+            url=url,
+            published_at=datetime(2026, 11, 20, tzinfo=timezone.utc) if dated else None,
+        )
+
+    by_source = {
+        "WHO DON": [cand("WHO DON", f"https://who.int/don/{i}", False) for i in range(5)],
+        "CDC Travel Notices": [cand("CDC", f"https://cdc.gov/n/{i}", True) for i in range(5)],
+        "ReliefWeb": [cand("ReliefWeb", f"https://reliefweb.int/r/{i}", False) for i in range(5)],
+    }
+
+    picked = pipeline_module.select_candidates(by_source, 6)
+    names = [c.source_name for c in picked]
+
+    assert len(picked) == 6
+    # Undated sources must not be starved by the dated one.
+    assert names.count("WHO DON") == 2
+    assert names.count("CDC") == 2
+    assert names.count("ReliefWeb") == 2
+
+
+def test_selection_dedupes_across_sources():
+    import pipeline as pipeline_module
+    from sources import Candidate
+
+    same = "https://example.org/story"
+    by_source = {
+        "A": [Candidate(source_name="A", url=same)],
+        "B": [Candidate(source_name="B", url=same + "/")],
+    }
+
+    assert len(pipeline_module.select_candidates(by_source, 10)) == 1
+
+
+def test_second_concurrent_run_is_refused(monkeypatch):
+    import asyncio
+    import mongomock
+    import db as db_module
+    import pipeline as pipeline_module
+
+    mongo = mongomock.MongoClient()["crisiswatch"]
+    monkeypatch.setattr(db_module, "outbreaks", mongo["outbreaks"])
+    monkeypatch.setattr(db_module, "pipeline_runs", mongo["pipeline_runs"])
+
+    mongo["pipeline_runs"].insert_one(
+        {"status": "running", "started_at": datetime.now(timezone.utc), "errors": []}
+    )
+
+    summary = asyncio.run(pipeline_module.run_pipeline(dry_run=False))
+
+    assert summary["status"] == "already_running"
+    assert mongo["pipeline_runs"].count_documents({}) == 1

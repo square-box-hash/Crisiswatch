@@ -285,6 +285,48 @@ def reconcile(incidents: list) -> list:
 # Pipeline
 # =============================================================================
 
+def select_candidates(by_source: dict, limit: int) -> list:
+    """
+    Take turns across sources so a small cap still samples every source.
+
+    Sorting all candidates by published_at and slicing looked reasonable but
+    starved every source without dates (WHO DON, ReliefWeb, ProMED) — with
+    limit=8 only CDC notices survived, and CDC notices carry no case counts.
+    """
+
+    queues = []
+
+    for name, items in by_source.items():
+        items = [c for c in items if c]
+        items.sort(
+            key=lambda c: c.published_at
+            or datetime(1970, 1, 1, tzinfo=timezone.utc),
+            reverse=True,
+        )
+        if items:
+            queues.append(items)
+
+    selected, seen = [], set()
+
+    while len(selected) < limit and any(queues):
+        progressed = False
+        for queue in queues:
+            if not queue:
+                continue
+            candidate = queue.pop(0)
+            progressed = True
+            if candidate.key() in seen:
+                continue
+            seen.add(candidate.key())
+            selected.append(candidate)
+            if len(selected) >= limit:
+                break
+        if not progressed:
+            break
+
+    return selected
+
+
 async def _fetch_article_text(client, candidate, max_chars: int = 10_000) -> str:
     """Use inline text (ReliefWeb body, RSS summary) when it's substantial."""
 
@@ -308,6 +350,24 @@ async def run_pipeline(
     started = datetime.now(timezone.utc)
     limit = max_articles or MAX_ARTICLES
 
+    if not dry_run:
+        # Close out runs orphaned by an instance restart, then refuse to start
+        # a second concurrent run (two runs double the Gemini spend and race on
+        # the same documents).
+        store.mark_stale_runs()
+
+        active = store.active_run()
+        if active:
+            log.warning(
+                f"[Runs] already running since {active.get('started_at')} — skipping"
+            )
+            return {
+                "status": "already_running",
+                "run_id": str(active.get("_id")),
+                "started_at": str(active.get("started_at")),
+                "errors": [],
+            }
+
     run_id = None if dry_run else store.start_run()
 
     summary = {
@@ -327,11 +387,6 @@ async def run_pipeline(
 
     try:
         if not dry_run:
-            # Clear out runs left "running" by an instance that died mid-run.
-            stale = store.mark_stale_runs()
-            if stale:
-                log.info(f"[Runs] marked {stale} stale run(s) as abandoned")
-
             db.ensure_indexes()
 
             if init_client() is None:
@@ -352,8 +407,7 @@ async def run_pipeline(
             return_exceptions=True,
         )
 
-        candidates = []
-        seen = set()
+        by_source = {}
 
         for (name, _cfg), result in zip(sources.SOURCES.items(), collected):
             if isinstance(result, Exception):
@@ -361,30 +415,32 @@ async def run_pipeline(
                 summary["sources"][name] = 0
                 continue
             summary["sources"][name] = len(result)
-            for c in result:
-                if c.key() in seen:
-                    continue
-                seen.add(c.key())
-                candidates.append(c)
+            by_source[name] = list(result)
 
-        summary["candidates"] = len(candidates)
-        log.info(f"[Collect] {len(candidates)} unique candidate(s) from {len(sources.SOURCES)} source(s)")
+        total = sum(len(v) for v in by_source.values())
+        summary["candidates"] = total
+        log.info(
+            f"[Collect] {total} candidate(s) from "
+            f"{sum(1 for v in by_source.values() if v)}/{len(sources.SOURCES)} source(s)"
+        )
 
-        if not candidates:
+        if total == 0:
             summary["status"] = "no_sources"
             summary["errors"].append(
                 "No candidates from any source — every feed returned nothing. "
                 "Check the [Source] log lines above."
             )
-            store.finish_run(run_id, summary)
             return summary
 
-        # Newest first, then cap.
-        candidates.sort(
-            key=lambda c: c.published_at or datetime(1970, 1, 1, tzinfo=timezone.utc),
-            reverse=True,
+        candidates = select_candidates(by_source, limit)
+        log.info(
+            "[Select] "
+            + ", ".join(
+                f"{name}:{sum(1 for c in candidates if c.source_name == name)}"
+                for name in by_source
+                if any(c.source_name == name for c in candidates)
+            )
         )
-        candidates = candidates[:limit]
 
         # ── 2. Fetch article text ──
         texts = await gather_limited(
