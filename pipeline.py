@@ -31,10 +31,12 @@ import store
 from extract import extract_from_candidate, init_client
 from fetch import fetch_page, gather_limited, make_client
 import assess
+import research
 import synthesis
 from models import (
     CanonicalIncident,
     Evidence,
+    OutbreakStatus,
     OutbreakLifecycle,
     SeverityLevel,
     SpreadRisk,
@@ -159,6 +161,31 @@ def derive_severity(
         return SeverityLevel.MODERATE
 
     return SeverityLevel.LOW
+
+
+def refresh_from_evidence(incident) -> None:
+    """Recompute figures, provenance and status from the evidence ledger."""
+
+    entries = [
+        asdict(e) if isinstance(e, Evidence) else e for e in incident.evidence
+    ]
+    summary = assess.summarise_evidence(entries)
+
+    incident.estimated_cases = summary["cases"]
+    incident.estimated_deaths = summary["deaths"]
+    incident.cases_source = summary["cases_source"]
+    incident.cases_as_of = summary["cases_as_of"]
+    incident.cases_unknown = summary["cases_unknown"]
+    incident.status = OutbreakStatus(summary["status"])
+    incident.source_count = len(incident.evidence)
+
+    incident.severity = derive_severity(
+        incident.spread_risk,
+        incident.lifecycle_stage,
+        incident.estimated_cases,
+        incident.estimated_deaths,
+        incident.population,
+    )
 
 
 def calibrate_confidence(raw: float, reputation: float) -> float:
@@ -288,29 +315,12 @@ def reconcile(incidents: list) -> list:
             primary.source_names = list({n for g in group for n in g.source_names if n})
             primary.source_count = len(primary.source_urls)
 
-            # Figures come from assess: official sources first, never invented.
-            cases, deaths, source_url, _as_of = assess.best_counts(
-                assess.evidence_to_objects(merged_evidence)
-            )
-            primary.estimated_cases = cases
-            primary.estimated_deaths = deaths
-            primary.cases_source = source_url
-            primary.cases_unknown = cases is None
-            primary.status = assess.derive_status(
-                assess.evidence_to_objects(merged_evidence)
-            )
-
             primary.neighboring_mentions = list(
                 {c for g in group for c in g.neighboring_mentions}
             )
 
-            primary.severity = derive_severity(
-                primary.spread_risk,
-                primary.lifecycle_stage,
-                primary.estimated_cases,
-                primary.estimated_deaths,
-                primary.population,
-            )
+            # Figures come from assess: official sources first, never invented.
+            refresh_from_evidence(primary)
 
         merged.append(primary)
 
@@ -537,6 +547,39 @@ async def run_pipeline(
         # ── 5. Merge across sources ──
         incidents = reconcile(incidents)
         log.info(f"[Reconcile] {len(incidents)} unique incident(s)")
+
+        # ── 5a. Research the records that are still thin ──
+        if research.enabled():
+            thin = [i for i in incidents if research.needs_research(i)]
+            thin.sort(key=lambda i: (i.estimated_cases is not None, len(i.evidence)))
+            thin = thin[: research.MAX_RESEARCH_PER_RUN]
+
+            if thin:
+                log.info(
+                    f"[Research] {len(thin)} record(s) without a stated figure"
+                )
+
+                found = await gather_limited(
+                    [research.research_incident(client, i) for i in thin],
+                    limit=2,
+                )
+
+                for incident, extra in zip(thin, found):
+                    if not extra:
+                        continue
+                    incident.evidence = list(incident.evidence) + extra
+                    incident.source_urls = sorted(
+                        {e.url for e in incident.evidence if e.url}
+                    )
+                    incident.source_names = sorted(
+                        {e.source_name for e in incident.evidence if e.source_name}
+                    )
+                    refresh_from_evidence(incident)
+                    log.info(
+                        f"[Research] {incident.disease}/{incident.country} now "
+                        f"{incident.estimated_cases if incident.estimated_cases is not None else 'unknown'} "
+                        f"cases, {incident.status.value}"
+                    )
 
         # ── 5b. Cross-source synthesis ──
         # Only worth a call when more than one source described the outbreak.

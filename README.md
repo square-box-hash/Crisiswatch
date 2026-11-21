@@ -237,6 +237,30 @@ number whose source URL is not in the evidence set. Headline counts are chosen
 deterministically in `assess.py` (official sources first, highest stated
 figure), so every number in the record traces to a URL.
 
+### Research (optional, Tavily)
+
+Some records arrive with no figure at all — a travel notice says "yellow fever
+is present in Ghana" and stops there. When `TAVILY_API_KEY` is set, the pipeline
+spends a search on exactly those records:
+
+1. it searches `<disease> <country> outbreak confirmed cases <year>`;
+2. fetches the top results (official domains keep their HIGH tier, everything
+   else is LOW);
+3. runs the normal Gemini extraction over each page;
+4. keeps only results that match **both** the disease and the country, then
+   recomputes the figures and status from the enlarged evidence ledger.
+
+So a `signal` record can become `probable` or `confirmed` inside one run — but
+only because a new URL was actually read, never because the model was asked to
+guess.
+
+Cost: one search credit per record, plus one Gemini call per page. Defaults are
+`MAX_RESEARCH_PER_RUN=3` and `RESEARCH_PAGES=3`, so a run spends at most 3
+credits. The free plan is 1,000 credits/month and hard-stops when exhausted —
+it will not bill you.
+
+Leave `TAVILY_API_KEY` empty to disable the whole step.
+
 ### GDELT (optional)
 
 `ENABLE_GDELT=1` adds news articles as a low-reputation corroboration source.
