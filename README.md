@@ -107,6 +107,13 @@ python scripts/migrate_v5.py --yes    # backfill, merge duplicates, create index
 
 It is idempotent and merges rows that map to the same outbreak.
 
+Free Render instances have no shell, so the same thing is available over HTTP:
+
+```bash
+curl -X POST "https://YOUR-API/admin/migrate?secret=$CRON_SECRET&dry_run=true"   # preview
+curl -X POST "https://YOUR-API/admin/migrate?secret=$CRON_SECRET"                # run it
+```
+
 ---
 
 ## Is it actually live? Check these three things
@@ -154,6 +161,7 @@ endpoints answer 503 with that same message.
 | POST | `/workers/register` | health worker signup |
 | POST | `/workers/{id}/verify` | needs secret |
 | POST | `/outbreaks/{id}/review` | worker review + consensus |
+| POST | `/admin/migrate` | backfill legacy documents — needs secret, `&dry_run=true` to preview |
 
 Writes take the secret either as `?secret=` or an `x-cron-secret` header.
 

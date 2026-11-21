@@ -277,3 +277,45 @@ def test_api_boots_when_mongo_dns_fails(monkeypatch):
         monkeypatch.undo()
         importlib.reload(db)
         importlib.reload(api)
+
+
+# ── Admin migration endpoint (no shell on free Render) ──────
+
+def test_admin_migrate_requires_secret(client):
+    assert client.post("/admin/migrate").status_code == 401
+
+
+def test_admin_migrate_backfills_legacy_documents(client):
+    from datetime import datetime, timezone
+
+    when = datetime.now(timezone.utc)
+    db.outbreaks.insert_one(
+        {
+            "disease": "Cholera",
+            "country": "Zambia",
+            "cluster_signal": {"cases": 88, "deaths": 2},
+            "created_at": when,
+            "updated_at": when,
+        }
+    )
+
+    resp = client.post("/admin/migrate?secret=test-secret")
+    assert resp.status_code == 200
+    assert resp.json()["scanned"] == 1
+
+    doc = db.outbreaks.find_one({})
+    assert doc["incident_key"] == "cholera:zambia"
+    assert doc["estimated_cases"] == 88
+    assert doc["last_seen"] is not None
+
+    # And the API can now see it through the days filter.
+    assert len(client.get("/outbreaks?days=7").json()) == 1
+
+
+def test_admin_migrate_dry_run_writes_nothing(client):
+    db.outbreaks.insert_one({"disease": "Cholera", "country": "Zambia"})
+
+    resp = client.post("/admin/migrate?secret=test-secret&dry_run=true")
+    assert resp.status_code == 200
+    assert resp.json()["dry_run"] is True
+    assert "incident_key" not in db.outbreaks.find_one({})

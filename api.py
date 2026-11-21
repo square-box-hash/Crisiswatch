@@ -329,6 +329,34 @@ def detect_outbreak(
     return {"status": "stored", **result}
 
 
+@app.post("/admin/migrate")
+def admin_migrate(
+    secret: Optional[str] = Query(None),
+    x_cron_secret: Optional[str] = Header(None, alias="x-cron-secret"),
+    dry_run: bool = False,
+):
+    """
+    Backfill legacy documents (no incident_key / last_seen / snapshots).
+
+    Exists because free Render instances have no shell, so the migration cannot
+    be run from inside the container. Idempotent — safe to call twice.
+    """
+
+    _require_secret(secret, x_cron_secret)
+
+    collection = _collection()
+
+    if dry_run:
+        return {"dry_run": True, "documents": collection.count_documents({})}
+
+    from migrate import migrate
+
+    result = migrate(collection)
+    db.ensure_indexes()
+
+    return {"status": "migrated", **result}
+
+
 @app.delete("/outbreaks/{outbreak_id}")
 def delete_outbreak(
     outbreak_id: str,
