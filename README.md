@@ -120,6 +120,57 @@ GET /trigger-pipeline?secret=$CRON_SECRET
 
 ---
 
+## Scheduling — once a day
+
+One run a day is the right shape for this: outbreaks change on the scale of
+days, and a daily run costs ~15 Gemini calls instead of ~500.
+
+| Tool | Schedule | Notes |
+|---|---|---|
+| **cron-job.org** (free) | `30 18 * * *` | UTC → 00:00 IST. Supports real cron expressions. |
+| Render Cron Job | `30 18 * * *` | $1/month, UTC. Cleanest if you are already on Render. |
+| UptimeRobot (free) | every 1440 minutes | Cannot pin a time of day — it drifts from when you created it. |
+
+Point it at:
+
+```
+GET https://YOUR-API/trigger-pipeline?secret=$CRON_SECRET
+```
+
+Set the request timeout to **at least 60s**: a free instance that has been idle
+for a day needs ~1 minute to wake before it answers.
+
+With a daily run you can raise `MAX_ARTICLES_PER_RUN` back to 12 — quota is no
+longer the binding constraint.
+
+## Retention — only quantified records are kept
+
+With `PURGE_UNQUANTIFIED=1` (the default), every run ends with a sweep that
+deletes records still carrying no case count:
+
+- **kept:** any record with a stated case count above zero
+- **deleted:** `cases: null`, `cases: 0`, or no figure at all — including the
+  `signal` rows that come from travel advisories
+
+Each run reports it in the summary and the log:
+
+```
+[Purge] removed 4 record(s) with no stated case count: Typhoid Fever/Senegal,
+        Malaria/Panama, Polio/Afghanistan, Yellow Fever/Ghana
+```
+
+Two consequences worth knowing before you rely on it:
+
+1. **History only accumulates for quantified outbreaks.** A signal deleted today
+   and re-detected tomorrow starts a fresh record — new `first_seen`, empty
+   `snapshots` — rather than continuing a series.
+2. **A record that gains a number later is safe.** Counts are never downgraded,
+   so once a record is quantified, later reports that state no figure cannot
+   erase it and cannot get it purged.
+
+Set `PURGE_UNQUANTIFIED=0` to keep the signals and filter them in the UI
+instead (`GET /outbreaks?status=confirmed,probable`).
+
 ## Upgrading an existing database
 
 Documents written by v4 have no `incident_key`, no `last_seen` and no

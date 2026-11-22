@@ -61,6 +61,8 @@ GEMINI_CONCURRENCY = int(os.getenv("GEMINI_CONCURRENCY", "2"))
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.30"))
 # Each synthesis is one more Gemini call; the free tier is the binding limit.
 SYNTHESIS_MAX_PER_RUN = int(os.getenv("SYNTHESIS_MAX_PER_RUN", "3"))
+# Keep only records that carry a number. Set to 0 to keep the signals too.
+PURGE_UNQUANTIFIED = os.getenv("PURGE_UNQUANTIFIED", "1") not in ("0", "false", "False")
 
 OPENMETEO_URL = (
     "https://api.open-meteo.com/v1/forecast"
@@ -429,6 +431,7 @@ async def run_pipeline(
         "items_extracted": 0,
         "incidents_created": 0,
         "incidents_updated": 0,
+        "purged": 0,
         "errors": [],
     }
 
@@ -670,6 +673,15 @@ async def run_pipeline(
                 summary["incidents_created"] += 1
             else:
                 summary["incidents_updated"] += 1
+
+        # ── 7. Retention: drop anything still unquantified ──
+        if not dry_run and PURGE_UNQUANTIFIED:
+            try:
+                purge = store.purge_unquantified()
+                summary["purged"] = purge["deleted"]
+                summary["kept"] = purge["kept"]
+            except Exception as exc:
+                summary["errors"].append(f"purge: {type(exc).__name__}: {exc}")
 
         summary["status"] = "ok" if incidents else "no_outbreaks"
         if not incidents:

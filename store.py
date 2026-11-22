@@ -210,6 +210,58 @@ def _fmt(value) -> str:
 
 
 # =============================================================================
+# Retention
+# =============================================================================
+
+UNQUANTIFIED = {
+    "$or": [
+        {"estimated_cases": None},
+        {"estimated_cases": {"$lte": 0}},
+        {"estimated_cases": {"$exists": False}},
+    ]
+}
+
+
+def purge_unquantified(limit_preview: int = 12) -> dict:
+    """
+    Delete records that still have no case count after a full run.
+
+    An outbreak nobody quantified is a signal, not a record — and a dashboard
+    full of them is noise. The cost is real: the record's first_seen and
+    snapshot history go with it, so if it gains a number tomorrow it starts
+    fresh rather than continuing its history.
+    """
+
+    collection = _require_collection()
+
+    doomed = list(
+        collection.find(UNQUANTIFIED, {"disease": 1, "country": 1, "status": 1})
+    )
+
+    if not doomed:
+        return {"deleted": 0, "kept": collection.count_documents({}), "sample": []}
+
+    deleted = collection.delete_many(UNQUANTIFIED).deleted_count
+
+    sample = [
+        f"{d.get('disease')}/{d.get('country')}"
+        for d in doomed[:limit_preview]
+    ]
+
+    log.info(
+        f"[Purge] removed {deleted} record(s) with no stated case count"
+        + (f": {', '.join(sample)}" if sample else "")
+    )
+
+    return {
+        "deleted": deleted,
+        "kept": collection.count_documents({}),
+        "sample": sample,
+        "sample_total": len(doomed),
+    }
+
+
+# =============================================================================
 # Run log — this is what answers "why did I get no live cases?"
 # =============================================================================
 

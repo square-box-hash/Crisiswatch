@@ -232,3 +232,60 @@ def test_second_source_upgrades_status_to_confirmed():
     assert doc["sources_agreeing"] == 2
     assert doc["estimated_cases"] == 640
     assert doc["estimated_deaths"] == 127
+
+
+# ── Retention: keep only quantified records ─────────────────
+
+def insert(cases, disease="Cholera", country="Zambia", status="signal"):
+    db.outbreaks.insert_one(
+        {
+            "incident_key": store.incident_key(disease, country),
+            "disease": disease,
+            "country": country,
+            "estimated_cases": cases,
+            "status": status,
+        }
+    )
+
+
+def test_purge_removes_records_without_a_count():
+    insert(None, disease="Typhoid Fever", country="Senegal")
+    insert(412, disease="Cholera", country="Zambia")
+
+    result = store.purge_unquantified()
+
+    assert result["deleted"] == 1
+    assert result["kept"] == 1
+    assert db.outbreaks.find_one({})["disease"] == "Cholera"
+
+
+def test_purge_removes_explicit_zero():
+    insert(0, disease="Polio", country="Afghanistan")
+    insert(635, disease="Ebola", country="Kenya")
+
+    assert store.purge_unquantified()["deleted"] == 1
+    assert db.outbreaks.count_documents({}) == 1
+
+
+def test_purge_keeps_a_single_case():
+    insert(1, disease="Measles", country="Yemen")
+
+    assert store.purge_unquantified()["deleted"] == 0
+    assert db.outbreaks.count_documents({}) == 1
+
+
+def test_purge_on_an_empty_collection_is_harmless():
+    result = store.purge_unquantified()
+
+    assert result == {"deleted": 0, "kept": 0, "sample": []}
+
+
+def test_purge_reports_what_it_removed():
+    insert(None, disease="Typhoid Fever", country="Senegal")
+    insert(None, disease="Malaria", country="Panama")
+
+    result = store.purge_unquantified()
+
+    assert result["deleted"] == 2
+    assert "Typhoid Fever/Senegal" in result["sample"]
+    assert result["sample_total"] == 2

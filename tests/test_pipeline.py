@@ -258,3 +258,29 @@ def test_second_concurrent_run_is_refused(monkeypatch):
 
     assert summary["status"] == "already_running"
     assert mongo["pipeline_runs"].count_documents({}) == 1
+
+
+# ── Retention is skipped in a dry run ───────────────────────
+
+def test_dry_run_never_purges(monkeypatch):
+    import asyncio
+    import mongomock
+    import db as db_module
+    import pipeline as pipeline_module
+    import sources as sources_module
+
+    mongo = mongomock.MongoClient()["crisiswatch"]
+    monkeypatch.setattr(db_module, "outbreaks", mongo["outbreaks"])
+    monkeypatch.setattr(db_module, "pipeline_runs", mongo["pipeline_runs"])
+
+    mongo["outbreaks"].insert_one({"incident_key": "x:y", "estimated_cases": None})
+
+    async def fake_collect(client, name, cfg, record=None):
+        return []
+
+    monkeypatch.setattr(sources_module, "collect_source", fake_collect)
+
+    summary = asyncio.run(pipeline_module.run_pipeline(dry_run=True))
+
+    assert summary["purged"] == 0
+    assert mongo["outbreaks"].count_documents({}) == 1
