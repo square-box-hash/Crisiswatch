@@ -245,6 +245,21 @@ def get_outbreaks(
     return [normalize_outbreak(d) for d in docs[:limit]]
 
 
+@app.get("/runs")
+def get_runs(limit: int = Query(5, ge=1, le=50)):
+    """Recent pipeline runs with their structured diagnostics."""
+
+    if db.pipeline_runs is None:
+        raise HTTPException(
+            status_code=503,
+            detail=db.connection_error() or "MONGODB_URI is not configured",
+        )
+
+    docs = list(db.pipeline_runs.find({}).sort("started_at", -1).limit(limit))
+
+    return [serialize(d) for d in docs]
+
+
 @app.get("/stats")
 def get_stats():
     """Counts for the sidebar badges — computed server-side, one shape."""

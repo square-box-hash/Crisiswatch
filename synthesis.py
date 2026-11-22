@@ -16,6 +16,7 @@ import logging
 import re
 from typing import Optional
 
+import diagnostics
 import extract
 
 log = logging.getLogger(__name__)
@@ -202,7 +203,7 @@ def normalise_result(result: dict, evidence: list) -> dict:
     }
 
 
-async def synthesise(disease: str, country: str, evidence: list) -> Optional[dict]:
+async def synthesise(disease: str, country: str, evidence: list, record=None) -> Optional[dict]:
     """One Gemini call over all evidence for an outbreak. None on failure."""
 
     if len(evidence) < 2:
@@ -214,6 +215,8 @@ async def synthesise(disease: str, country: str, evidence: list) -> Optional[dic
         raw = await asyncio.to_thread(extract._call_gemini, prompt)
     except Exception as exc:
         log.warning(f"[Synthesis] {disease}/{country} → {type(exc).__name__}: {exc}")
+        if record is not None:
+            record.fail_exc("synthesize", f"{disease}/{country}", exc)
         return None
 
     result = parse_object(raw)
@@ -222,6 +225,11 @@ async def synthesise(disease: str, country: str, evidence: list) -> Optional[dic
         log.warning(
             f"[Synthesis] {disease}/{country} → unparseable: {raw[:160]!r}"
         )
+        if record is not None:
+            record.fail(
+                "synthesize", f"{disease}/{country}", diagnostics.PARSE,
+                f"model returned text that is not JSON: {raw[:160]!r}",
+            )
         return None
 
     normalised = normalise_result(result, evidence)

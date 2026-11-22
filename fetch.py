@@ -7,6 +7,8 @@ from typing import Optional
 
 import httpx
 
+import diagnostics
+
 log = logging.getLogger(__name__)
 
 USER_AGENT = (
@@ -55,6 +57,7 @@ async def fetch_page(
     url: str,
     max_chars: int = 12_000,
     timeout: float = 30.0,
+    record=None,
 ) -> Optional[str]:
     """Fetch a page and return clean text, or None. Never raises."""
 
@@ -62,16 +65,26 @@ async def fetch_page(
         resp = await client.get(url, timeout=timeout)
     except Exception as exc:
         log.warning(f"[Fetch] {url} → {type(exc).__name__}: {exc}")
+        if record is not None:
+            record.fail_exc("fetch", url, exc, url=url)
         return None
 
     if resp.status_code != 200:
         log.warning(f"[Fetch] {url} → HTTP {resp.status_code}")
+        if record is not None:
+            record.fail_status("fetch", url, resp.status_code, resp.text[:200], url=url)
         return None
 
     text = html_to_text(resp.text, max_chars)
 
     if len(text) < 200:
         log.warning(f"[Fetch] {url} → only {len(text)} chars of text, skipping")
+        if record is not None:
+            record.fail(
+                "fetch", url, diagnostics.EMPTY,
+                f"only {len(text)} chars of readable text (likely JS-rendered)",
+                url=url,
+            )
         return None
 
     return text
@@ -81,15 +94,25 @@ async def fetch_bytes(
     client: httpx.AsyncClient,
     url: str,
     timeout: float = 30.0,
+    record=None,
 ) -> Optional[bytes]:
     try:
         resp = await client.get(url, timeout=timeout)
     except Exception as exc:
         log.warning(f"[Fetch] {url} → {type(exc).__name__}: {exc}")
+        if record is not None:
+            record.fail_exc("fetch", url, exc, url=url)
         return None
 
     if resp.status_code != 200:
         log.warning(f"[Fetch] {url} → HTTP {resp.status_code}")
+        if record is not None:
+            record.fail_status("fetch", url, resp.status_code, resp.text[:200], url=url)
+        return None
+
+    if not resp.content:
+        if record is not None:
+            record.fail("fetch", url, diagnostics.EMPTY, "empty body", url=url)
         return None
 
     return resp.content
@@ -100,11 +123,14 @@ async def fetch_json(
     url: str,
     params: Optional[dict] = None,
     timeout: float = 30.0,
+    record=None,
 ) -> Optional[dict]:
     try:
         resp = await client.get(url, params=params, timeout=timeout)
     except Exception as exc:
         log.warning(f"[Fetch] {url} → {type(exc).__name__}: {exc}")
+        if record is not None:
+            record.fail_exc("fetch", url, exc, url=url)
         return None
 
     if resp.status_code != 200:
@@ -112,12 +138,16 @@ async def fetch_json(
         log.warning(
             f"[Fetch] {url} → HTTP {resp.status_code}: {resp.text[:300]}"
         )
+        if record is not None:
+            record.fail_status("fetch", url, resp.status_code, resp.text[:300], url=url)
         return None
 
     try:
         return resp.json()
     except Exception as exc:
         log.warning(f"[Fetch] {url} → bad JSON: {exc}")
+        if record is not None:
+            record.fail_exc("fetch", url, exc, status=200, url=url)
         return None
 
 

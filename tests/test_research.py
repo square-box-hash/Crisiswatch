@@ -128,17 +128,17 @@ def test_candidate_takes_its_name_and_tier_from_the_url():
 def test_research_returns_evidence_and_skips_known_urls(monkeypatch):
     monkeypatch.setattr(research, "TAVILY_API_KEY", "test-key")
 
-    async def fake_search(client, query, max_results=5):
+    async def fake_search(client, query, max_results=5, record=None):
         return [
             {"url": "https://www.who.int/don/typhoid-senegal", "title": "Typhoid"},
             {"url": "https://known.example/already-have-it", "title": "Old"},
             {"url": "https://news.example/typhoid", "title": "News"},
         ]
 
-    async def fake_fetch(client, url, max_chars=10000):
+    async def fake_fetch(client, url, max_chars=10000, record=None):
         return "Typhoid fever outbreak in Senegal with 412 confirmed cases. " * 10
 
-    async def fake_extract(candidate, attempts=3):
+    async def fake_extract(candidate, attempts=3, record=None):
         if "who.int" in candidate.url:
             return (
                 [{"disease": "Typhoid Fever", "primary_country": "Senegal",

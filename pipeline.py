@@ -31,6 +31,7 @@ import store
 from extract import extract_from_candidate, init_client
 from fetch import fetch_page, gather_limited, make_client
 import assess
+import diagnostics
 import research
 import synthesis
 from models import (
@@ -414,6 +415,8 @@ async def run_pipeline(
                 "errors": [],
             }
 
+    record = diagnostics.Recorder()
+
     run_id = None if dry_run else store.start_run()
 
     summary = {
@@ -447,7 +450,7 @@ async def run_pipeline(
         # ── 1. Collect candidate articles from every source ──
         collected = await asyncio.gather(
             *[
-                sources.collect_source(client, name, cfg)
+                sources.collect_source(client, name, cfg, record=record)
                 for name, cfg in sources.SOURCES.items()
             ],
             return_exceptions=True,
@@ -473,8 +476,8 @@ async def run_pipeline(
         if total == 0:
             summary["status"] = "no_sources"
             summary["errors"].append(
-                "No candidates from any source — every feed returned nothing. "
-                "Check the [Source] log lines above."
+                "No candidates from any source. "
+                f"Failures: {record.headline()}"
             )
             return summary
 
@@ -516,7 +519,7 @@ async def run_pipeline(
 
         # ── 4. Gemini extraction ──
         results = await gather_limited(
-            [extract_from_candidate(a) for a in articles],
+            [extract_from_candidate(a, record=record) for a in articles],
             limit=GEMINI_CONCURRENCY,
         )
 
@@ -560,7 +563,7 @@ async def run_pipeline(
                 )
 
                 found = await gather_limited(
-                    [research.research_incident(client, i) for i in thin],
+                    [research.research_incident(client, i, record=record) for i in thin],
                     limit=2,
                 )
 
@@ -604,6 +607,7 @@ async def run_pipeline(
                         i.disease,
                         i.country,
                         [asdict(e) for e in i.evidence],
+                        record=record,
                     )
                     for i in multi
                 ],
@@ -663,6 +667,8 @@ async def run_pipeline(
         log.exception("[Pipeline] run failed")
 
     finally:
+        summary["diagnostics"] = record.to_dict()
+
         if client is not None:
             await client.aclose()
         summary["duration_s"] = round(
@@ -676,6 +682,15 @@ async def run_pipeline(
             f"{summary['incidents_updated']} updated, "
             f"{summary['duration_s']}s ──"
         )
+
+        # Say where it went wrong, in one line, at the level a reader needs.
+        headline = record.headline()
+        if record.failures:
+            log.warning(f"── Failures: {headline} ──")
+            for item in record.advice():
+                log.warning(f"   · {item['kind']}: {item['advice']}")
+        else:
+            log.info(f"── Failures: {headline} ──")
 
     return summary
 

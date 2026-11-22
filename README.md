@@ -274,6 +274,55 @@ Leave `TAVILY_API_KEY` empty to disable the whole step.
 `ENABLE_GDELT=1` adds news articles as a low-reputation corroboration source.
 Off by default: it is noisy and costs one Gemini call per article.
 
+## Diagnostics — where exactly it failed
+
+Every failure is recorded with three things: the **stage** (collect, fetch,
+extract, research, synthesize, store), the **subject** (a source name or a URL),
+and a **kind** that says what went wrong. The run document keeps them, so
+`GET /runs` and `GET /health` show them after the fact.
+
+The run log ends with one line and, when something failed, the fix:
+
+```
+── Run no_sources: 0 new, 0 updated, 0.7s ──
+── Failures: collect/disabled ×1, fetch/unavailable ×8 ──
+   · disabled: switched off — enable the flag if you want this source
+   · unavailable: the remote is down — transient, the next run may succeed
+```
+
+| Kind | Means | What to do |
+|---|---|---|
+| `no_key` | credential missing | set it in the environment |
+| `auth` | 401 / 403 | key wrong, expired, or lacks permission |
+| `rate_limit` | 429 / quota | slow down or raise the limit |
+| `unavailable` | 5xx | remote is down — retry later |
+| `not_found` | 404 | the URL moved; update the source config |
+| `timeout` | no answer in time | connectivity, or raise the timeout |
+| `dns` | hostname does not resolve | wrong URL, or the service is gone |
+| `connection` | refused / reset / TLS | network problem |
+| `http_error` | other non-200 | read the message for the remote's words |
+| `parse` | response arrived, unreadable | the parser needs updating |
+| `empty` | worked, returned nothing | check the query or the feed |
+| `no_match` | results, none about this case | widen the query |
+| `blocked` | refused this client | user agent, geo, or robots |
+| `disabled` | switched off by config | enable the flag |
+
+```json
+"diagnostics": {
+  "headline": "collect/auth ×1, fetch/timeout ×3",
+  "counts": { "auth": 1, "timeout": 3 },
+  "by_stage": { "collect": { "count": 1, "kinds": { "auth": 1 } } },
+  "failures": [
+    { "stage": "collect", "subject": "ECDC", "kind": "auth",
+      "status": 401, "message": "Unauthorized", "url": "https://..." }
+  ],
+  "advice": [ { "kind": "auth", "advice": "the key is wrong, expired, ..." } ]
+}
+```
+
+Nothing is swallowed: a source that returns zero candidates now says whether
+that was a 403, a timeout, or a page that parsed to nothing.
+
 ## Tests
 
 ```bash

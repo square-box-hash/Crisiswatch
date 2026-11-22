@@ -448,3 +448,42 @@ def test_stats_reports_status_buckets_and_unknown_counts(client):
     assert stats["by_status"]["signal"] == 1
     assert stats["unknown_cases"] == 1
     assert stats["cases"] == 100
+
+
+# ── Run diagnostics over HTTP ───────────────────────────────
+
+def test_runs_endpoint_returns_recent_runs_with_diagnostics(client):
+    from datetime import datetime, timezone
+
+    db.pipeline_runs.insert_one(
+        {
+            "started_at": datetime.now(timezone.utc),
+            "finished_at": datetime.now(timezone.utc),
+            "status": "ok",
+            "diagnostics": {
+                "counts": {"auth": 1},
+                "headline": "collect/auth ×1",
+                "by_stage": {"collect": {"count": 1, "kinds": {"auth": 1}}},
+                "failures": [{"stage": "collect", "subject": "ECDC",
+                              "kind": "auth", "message": "401", "status": 401}],
+            },
+        }
+    )
+
+    body = client.get("/runs").json()
+
+    assert len(body) == 1
+    assert body[0]["diagnostics"]["headline"] == "collect/auth ×1"
+    assert body[0]["diagnostics"]["failures"][0]["subject"] == "ECDC"
+
+
+def test_runs_endpoint_respects_limit(client):
+    from datetime import datetime, timedelta, timezone
+
+    now = datetime.now(timezone.utc)
+    for i in range(5):
+        db.pipeline_runs.insert_one(
+            {"started_at": now - timedelta(minutes=i), "status": "ok"}
+        )
+
+    assert len(client.get("/runs?limit=2").json()) == 2

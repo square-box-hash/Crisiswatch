@@ -14,6 +14,8 @@ import os
 import re
 from typing import Optional
 
+import diagnostics
+
 log = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -358,7 +360,7 @@ def _call_gemini(prompt: str) -> str:
     return (text or "").strip()
 
 
-async def extract_from_candidate(candidate, attempts: int = 3) -> tuple[list, str]:
+async def extract_from_candidate(candidate, attempts: int = 3, record=None) -> tuple[list, str]:
     """
     Returns (items, error). `error` is a human-readable reason when the call
     itself failed — it goes into the run log.
@@ -383,6 +385,14 @@ async def extract_from_candidate(candidate, attempts: int = 3) -> tuple[list, st
 
             if not retryable or attempt == attempts - 1:
                 log.warning(f"[Gemini] {candidate.url} → {last_error}")
+                if record is not None:
+                    kind = diagnostics.classify(exc=exc)
+                    if "api key" in message.lower() or "unavailable" in message.lower():
+                        kind = diagnostics.NO_KEY
+                    record.fail(
+                        "extract", candidate.source_name, kind,
+                        last_error, url=candidate.url,
+                    )
                 return [], last_error
 
             wait = 4 * (attempt + 1)
@@ -396,6 +406,12 @@ async def extract_from_candidate(candidate, attempts: int = 3) -> tuple[list, st
     if items is None:
         snippet = raw[:200].replace("\n", " ")
         log.warning(f"[Gemini] {candidate.url} → unparseable response: {snippet}")
+        if record is not None:
+            record.fail(
+                "extract", candidate.source_name, diagnostics.PARSE,
+                f"model returned text that is not JSON: {snippet}",
+                url=candidate.url,
+            )
         return [], f"unparseable JSON response: {snippet}"
 
     valid = []

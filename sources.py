@@ -24,6 +24,7 @@ from urllib.parse import urljoin, urlparse
 
 import feedparser
 
+import diagnostics
 from fetch import fetch_bytes, fetch_json, fetch_page, html_to_text
 
 log = logging.getLogger(__name__)
@@ -404,10 +405,13 @@ def slug_hints(url: str) -> tuple[str, str]:
 # Collectors (network)
 # =============================================================================
 
-async def collect_source(client, name: str, cfg: dict) -> list[Candidate]:
+async def collect_source(client, name: str, cfg: dict, record=None) -> list[Candidate]:
     """Fetch one source's index and return candidates. Never raises."""
 
     if cfg.get("enabled") is False:
+        if record is not None:
+            record.fail("collect", name, diagnostics.DISABLED,
+                        "source is switched off by configuration", url=cfg.get("url"))
         return []
 
     limit = int(cfg.get("limit", 10))
@@ -415,7 +419,7 @@ async def collect_source(client, name: str, cfg: dict) -> list[Candidate]:
 
     try:
         if kind == "listing":
-            text = await fetch_page(client, cfg["url"], max_chars=12_000)
+            text = await fetch_page(client, cfg["url"], max_chars=12_000, record=record)
             if not text:
                 return []
             return [
@@ -439,7 +443,7 @@ async def collect_source(client, name: str, cfg: dict) -> list[Candidate]:
                 "filter[value]": "EP",
                 "fields[include][]": RELIFWEB_FIELDS,
             }
-            payload = await fetch_json(client, cfg["url"], params=params)
+            payload = await fetch_json(client, cfg["url"], params=params, record=record)
             if not payload:
                 return []
             candidates = parse_reliefweb(payload, cfg, limit)
@@ -453,23 +457,30 @@ async def collect_source(client, name: str, cfg: dict) -> list[Candidate]:
                 "format": "json",
                 "sort": "hybridrel",
             }
-            payload = await fetch_json(client, cfg["url"], params=params)
+            payload = await fetch_json(client, cfg["url"], params=params, record=record)
             if not payload:
                 return []
             candidates = parse_gdelt(payload, cfg, limit)
 
         elif parser_name in ("rss", "promed"):
-            raw = await fetch_bytes(client, cfg["url"])
+            raw = await fetch_bytes(client, cfg["url"], record=record)
             if not raw:
                 return []
             candidates = PARSERS[parser_name](raw, {**cfg, "name": name}, limit)
 
         else:
-            html = await fetch_bytes(client, cfg["url"])
+            html = await fetch_bytes(client, cfg["url"], record=record)
             if not html:
                 return []
             candidates = PARSERS[parser_name](
                 html.decode("utf-8", "replace"), cfg, limit
+            )
+
+        if not candidates and record is not None:
+            record.fail(
+                "collect", name, diagnostics.EMPTY,
+                "index fetched and parsed, but yielded no article links",
+                url=cfg.get("url"),
             )
 
         for c in candidates:
@@ -482,4 +493,6 @@ async def collect_source(client, name: str, cfg: dict) -> list[Candidate]:
 
     except Exception as exc:
         log.warning(f"[Source] {name} failed: {type(exc).__name__}: {exc}")
+        if record is not None:
+            record.fail_exc("collect", name, exc, url=cfg.get("url"))
         return []

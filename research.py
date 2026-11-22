@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlparse
 
+import diagnostics
 from assess import derive_status
 from extract import extract_from_candidate
 from fetch import fetch_page
@@ -173,10 +174,13 @@ def same_outbreak(item: dict, disease: str, country: str) -> bool:
     return bool(item_tokens & target_tokens)
 
 
-async def search(client, query: str, max_results: int = 5) -> list:
+async def search(client, query: str, max_results: int = 5, record=None) -> list:
     """Tavily search. Returns [] on any failure — research is optional."""
 
     if not enabled():
+        if record is not None:
+            record.fail("research", "tavily", diagnostics.NO_KEY,
+                        "TAVILY_API_KEY is not set — research is disabled")
         return []
 
     payload = {
@@ -199,26 +203,39 @@ async def search(client, query: str, max_results: int = 5) -> list:
         resp = await client.post(TAVILY_URL, json=payload, headers=headers, timeout=30)
     except Exception as exc:
         log.warning(f"[Research] search failed: {type(exc).__name__}: {exc}")
+        if record is not None:
+            record.fail_exc("research", "tavily", exc, url=TAVILY_URL)
         return []
 
     if resp.status_code != 200:
         log.warning(
             f"[Research] search HTTP {resp.status_code}: {resp.text[:200]}"
         )
+        if record is not None:
+            record.fail_status(
+                "research", "tavily", resp.status_code, resp.text[:200], url=TAVILY_URL
+            )
         return []
 
     try:
         data = resp.json()
-    except Exception:
+    except Exception as exc:
         log.warning("[Research] search returned non-JSON")
+        if record is not None:
+            record.fail_exc("research", "tavily", exc, status=200, url=TAVILY_URL)
         return []
 
     results = data.get("results") or []
+
+    if not results and record is not None:
+        record.fail("research", "tavily", diagnostics.EMPTY,
+                    f"search for {query!r} returned no results", url=TAVILY_URL)
+
     log.info(f"[Research] '{query}' → {len(results)} result(s)")
     return results
 
 
-async def research_incident(client, incident) -> list:
+async def research_incident(client, incident, record=None) -> list:
     """
     Search, fetch, extract, and return the extra Evidence for one outbreak.
     Never raises: a failed lookup just leaves the record as it was.
@@ -228,7 +245,7 @@ async def research_incident(client, incident) -> list:
         return []
 
     query = research_query(incident.disease, incident.country)
-    results = await search(client, query, max_results=PAGES_PER_INCIDENT + 2)
+    results = await search(client, query, max_results=PAGES_PER_INCIDENT + 2, record=record)
 
     if not results:
         return []
@@ -245,7 +262,7 @@ async def research_incident(client, incident) -> list:
             continue
 
         # Prefer the real page; fall back to Tavily's snippet.
-        text = await fetch_page(client, url, max_chars=10_000)
+        text = await fetch_page(client, url, max_chars=10_000, record=record)
         if not text:
             text = (result.get("content") or "").strip()
 
@@ -255,7 +272,7 @@ async def research_incident(client, incident) -> list:
         candidate = build_candidate(result, text)
         candidate.text = text
 
-        items, error = await extract_from_candidate(candidate, attempts=2)
+        items, error = await extract_from_candidate(candidate, attempts=2, record=record)
 
         if error:
             log.info(f"[Research] {url} → {error}")
@@ -280,6 +297,12 @@ async def research_incident(client, incident) -> list:
                     excerpt=text[:1200],
                 )
             )
+
+    if not extra and record is not None:
+        record.fail(
+            "research", f"{incident.disease}/{incident.country}", diagnostics.NO_MATCH,
+            f"{len(results)} result(s) returned, none matched this outbreak",
+        )
 
     with_figures = sum(1 for e in extra if e.cases is not None)
     log.info(
