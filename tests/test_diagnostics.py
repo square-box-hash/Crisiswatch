@@ -23,7 +23,7 @@ FakeTimeout.__name__ = "ReadTimeout"
 
 @pytest.mark.parametrize("status,expected", [
     (401, diagnostics.AUTH),
-    (403, diagnostics.AUTH),
+    (403, diagnostics.BLOCKED),
     (404, diagnostics.NOT_FOUND),
     (429, diagnostics.RATE_LIMIT),
     (500, diagnostics.UNAVAILABLE),
@@ -66,7 +66,8 @@ def test_records_stage_subject_and_kind():
     assert len(record.failures) == 1
     failure = record.failures[0]
     assert failure.stage == "fetch"
-    assert failure.kind == diagnostics.AUTH
+    # A random site refusing us is bot protection, not a credential problem.
+    assert failure.kind == diagnostics.BLOCKED
     assert failure.status == 403
     assert failure.retryable is False
 
@@ -177,3 +178,37 @@ def test_run_summary_carries_diagnostics(monkeypatch):
     assert diag["by_stage"]["collect"]["count"] == 1
     assert "collect/auth" in diag["headline"]
     assert diag["advice"][0]["kind"] == "auth"
+
+
+# ── Quota and 403 nuance ────────────────────────────────────
+
+def test_429_in_a_message_is_recognised_without_a_status():
+    kind = classify(message="ClientError: 429 RESOURCE_EXHAUSTED")
+    assert kind == diagnostics.RATE_LIMIT
+
+
+def test_daily_quota_is_distinguished_from_a_per_minute_limit():
+    daily = classify(
+        message="429 RESOURCE_EXHAUSTED ... Quota exceeded for metric: "
+                "generate_content_free_tier_requests, limit: 20, per day"
+    )
+    assert daily == diagnostics.QUOTA
+
+    per_minute = classify(
+        message="429 RESOURCE_EXHAUSTED ... per minute limit, retryDelay: 22s"
+    )
+    assert per_minute == diagnostics.RATE_LIMIT
+
+
+def test_403_from_a_keyed_api_is_a_credential_problem():
+    kind = classify(status=403, message="https://generativelanguage.googleapis.com/v1")
+    assert kind == diagnostics.AUTH
+
+
+def test_202_is_a_blocked_challenge_not_an_unknown():
+    assert classify(status=202) == diagnostics.BLOCKED
+
+
+def test_looks_like_daily_quota_helper():
+    assert diagnostics.looks_like_daily_quota("limit: 20, per day") is True
+    assert diagnostics.looks_like_daily_quota("retryDelay: 22s") is False

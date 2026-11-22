@@ -59,6 +59,8 @@ MAX_ARTICLES = int(os.getenv("MAX_ARTICLES_PER_RUN", "24"))
 FETCH_CONCURRENCY = int(os.getenv("FETCH_CONCURRENCY", "5"))
 GEMINI_CONCURRENCY = int(os.getenv("GEMINI_CONCURRENCY", "2"))
 MIN_CONFIDENCE = float(os.getenv("MIN_CONFIDENCE", "0.30"))
+# Each synthesis is one more Gemini call; the free tier is the binding limit.
+SYNTHESIS_MAX_PER_RUN = int(os.getenv("SYNTHESIS_MAX_PER_RUN", "3"))
 
 OPENMETEO_URL = (
     "https://api.open-meteo.com/v1/forecast"
@@ -524,12 +526,15 @@ async def run_pipeline(
         )
 
         incidents = []
+        quota_exhausted = False
 
         for candidate, result in zip(articles, results):
             if not result:
                 continue
             items, error = result
             if error:
+                if error.startswith("QUOTA_DAY:"):
+                    quota_exhausted = True
                 summary["errors"].append(f"{candidate.source_name}: {error}")
                 continue
             summary["items_extracted"] += len(items)
@@ -551,8 +556,17 @@ async def run_pipeline(
         incidents = reconcile(incidents)
         log.info(f"[Reconcile] {len(incidents)} unique incident(s)")
 
+        if quota_exhausted:
+            log.warning(
+                "[Gemini] daily free-tier quota is exhausted — skipping research "
+                "and synthesis so the run does not spend requests it cannot use"
+            )
+            summary["errors"].append(
+                "Gemini daily quota exhausted: research and synthesis skipped"
+            )
+
         # ── 5a. Research the records that are still thin ──
-        if research.enabled():
+        if research.enabled() and not quota_exhausted:
             thin = [i for i in incidents if research.needs_research(i)]
             thin.sort(key=lambda i: (i.estimated_cases is not None, len(i.evidence)))
             thin = thin[: research.MAX_RESEARCH_PER_RUN]
@@ -598,9 +612,13 @@ async def run_pipeline(
 
         # ── 5b. Cross-source synthesis ──
         # Only worth a call when more than one source described the outbreak.
-        multi = [i for i in incidents if len(i.evidence) >= 2]
+        # Already-confirmed records gain nothing from a synthesis call.
+        multi = [
+            i for i in incidents
+            if len(i.evidence) >= 2 and i.status != OutbreakStatus.CONFIRMED
+        ][:SYNTHESIS_MAX_PER_RUN]
 
-        if multi:
+        if multi and not quota_exhausted:
             synth_results = await gather_limited(
                 [
                     synthesis.synthesise(

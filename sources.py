@@ -89,15 +89,16 @@ SOURCES = {
     "ReliefWeb": {
         "kind": "articles",
         "parser": "reliefweb",
-        "url": "https://api.reliefweb.int/v1/reports",
+        # v1 was decommissioned (HTTP 410); v2 takes the same parameters.
+        "url": "https://api.reliefweb.int/v2/reports",
         "reputation": 0.92,
         "tier": "HIGH",
         "limit": 12,
     },
     "ProMED": {
-        "kind": "articles",
-        "parser": "promed",
-        "url": "https://promedmail.org/promed-posts/",
+        # /promed-posts/ 404s; the homepage carries the weekly alert table.
+        "kind": "listing",
+        "url": "https://promedmail.org/",
         "reputation": 0.90,
         "tier": "HIGH",
         "limit": 8,
@@ -150,7 +151,8 @@ SOURCES = {
     "Africa CDC (ReliefWeb)": {
         "kind": "articles",
         "parser": "reliefweb",
-        "url": "https://api.reliefweb.int/v1/reports",
+        # v1 was decommissioned (HTTP 410); v2 takes the same parameters.
+        "url": "https://api.reliefweb.int/v2/reports",
         "reputation": 0.93,
         "tier": "HIGH",
         "limit": 8,

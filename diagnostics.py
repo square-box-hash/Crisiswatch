@@ -30,10 +30,24 @@ EMPTY = "empty"                   # response arrived, nothing in it
 NO_MATCH = "no_match"             # content arrived, none of it about our case
 BLOCKED = "blocked"               # blocked by policy / robots / geo
 DISABLED = "disabled"             # switched off by configuration
+QUOTA = "quota"                   # free-tier allowance exhausted for the day
 UNKNOWN = "unknown"
 
 # Which kinds are worth retrying later, and which are pointless.
 RETRYABLE = {RATE_LIMIT, UNAVAILABLE, TIMEOUT, CONNECTION, DNS}
+
+# Hosts where a 403 means "your key", not "your client is blocked".
+API_HOSTS = ("googleapis.com", "tavily.com", "reliefweb.int")
+
+
+def looks_like_daily_quota(message: str) -> bool:
+    """A per-day allowance that retrying cannot fix."""
+
+    text = (message or "").lower()
+    return any(
+        marker in text
+        for marker in ("perday", "per day", "free_tier_requests", "daily limit")
+    )
 
 # A hint, per kind, that tells the reader what to do about it.
 ADVICE = {
@@ -51,6 +65,7 @@ ADVICE = {
     NO_MATCH: "results came back but none matched this outbreak — widen the query",
     BLOCKED: "the remote refused this client — user agent, geo, or robots",
     DISABLED: "switched off — enable the flag if you want this source",
+    QUOTA: "the daily free-tier allowance is gone — wait for the reset (midnight Pacific) or reduce calls per run",
     UNKNOWN: "read the message",
 }
 
@@ -81,11 +96,24 @@ def classify(status: Optional[int] = None, exc: Optional[BaseException] = None,
              message: str = "") -> str:
     """Map an HTTP status or an exception onto the vocabulary above."""
 
+    text = (message or "").lower()
+
+    # A 429 usually arrives as an exception, so read the body too.
+    if "429" in text or "resource_exhausted" in text or "quota exceeded" in text:
+        return QUOTA if looks_like_daily_quota(message) else RATE_LIMIT
+
     if status is not None:
         if status == 401:
             return AUTH
         if status == 403:
-            return BLOCKED if "robots" in message.lower() else AUTH
+            # A keyed API refusing us is a credential problem; any other site
+            # refusing us is bot protection, which is not something a key fixes.
+            if any(host in (message or "") for host in API_HOSTS):
+                return AUTH
+            return BLOCKED
+        if status in (202, 203):
+            # Accepted-but-withheld: bot challenge pages do this.
+            return BLOCKED
         if status == 404:
             return NOT_FOUND
         if status == 429:

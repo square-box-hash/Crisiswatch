@@ -377,23 +377,29 @@ async def extract_from_candidate(candidate, attempts: int = 3, record=None) -> t
             last_error = f"{type(exc).__name__}: {exc}"
             message = str(exc)
 
+            # A daily allowance is not worth retrying — it will not clear for
+            # hours, and each attempt spends another request.
+            daily = diagnostics.looks_like_daily_quota(message)
+
             retryable = any(
                 token in message
                 for token in ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED",
                               "overloaded", "timeout", "Timeout")
-            )
+            ) and not daily
 
             if not retryable or attempt == attempts - 1:
                 log.warning(f"[Gemini] {candidate.url} → {last_error}")
                 if record is not None:
-                    kind = diagnostics.classify(exc=exc)
+                    kind = diagnostics.classify(exc=exc, message=message)
                     if "api key" in message.lower() or "unavailable" in message.lower():
                         kind = diagnostics.NO_KEY
                     record.fail(
                         "extract", candidate.source_name, kind,
                         last_error, url=candidate.url,
                     )
-                return [], last_error
+                # Signal the caller so it can stop spending quota.
+                marker = "QUOTA_DAY: " if daily else ""
+                return [], f"{marker}{last_error}"
 
             wait = 4 * (attempt + 1)
             log.info(f"[Gemini] retryable error, waiting {wait}s ({attempt + 1}/{attempts})")

@@ -54,6 +54,12 @@ OFFICIAL_DOMAINS = {
 # Statuses worth spending a search credit on.
 RESEARCH_STATUSES = {OutbreakStatus.SIGNAL, OutbreakStatus.SUSPECTED}
 
+# Search results that are never worth a fetch: JS-only or login-walled.
+SKIP_DOMAINS = (
+    "facebook.com", "instagram.com", "x.com", "twitter.com", "tiktok.com",
+    "linkedin.com", "youtube.com", "reddit.com", "pinterest.com",
+)
+
 COUNTRY_ALIASES = {
     "drc": "democratic republic of the congo",
     "dr congo": "democratic republic of the congo",
@@ -259,6 +265,13 @@ async def research_incident(client, incident, record=None) -> list:
 
         url = result.get("url") or ""
         if not url or url.split("?")[0].rstrip("/").lower() in known:
+            continue
+
+        host = (urlparse(url).hostname or "").lower()
+        if any(host == d or host.endswith("." + d) for d in SKIP_DOMAINS):
+            if record is not None:
+                record.fail("research", host, diagnostics.EMPTY,
+                            "skipped: social/JS-only page cannot be read", url=url)
             continue
 
         # Prefer the real page; fall back to Tavily's snippet.
