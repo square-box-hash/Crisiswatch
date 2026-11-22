@@ -35,21 +35,47 @@ overwritten or duplicated.
 
 ## Sources
 
-| Source | Type | Reputation |
-|---|---|---|
-| WHO Disease Outbreak News | item pages from the DON listing | 0.98 |
-| CDC Travel Notices | RSS → notice pages | 0.95 |
-| ECDC threats | threat pages | 0.94 |
-| ReliefWeb | v1 `/reports` API (epidemic filter) | 0.92 |
-| ProMED | feed, falling back to the posts index | 0.90 |
-| Outbreak News Today | RSS | 0.72 |
-| WHO AFRO | listing text | 0.96 |
-| HealthMap | listing text | 0.78 |
+All free, no API key required unless noted.
 
-Every source is independent: one failing logs a warning and the run continues.
-`pipeline_runs` in Mongo records what each source returned.
+| Source | Access | Tier | Notes |
+|---|---|---|---|
+| **WHO DON API** | JSON (`/api/emergencies/diseaseoutbreaknews`) | HIGH 0.98 | structured items with real dates; falls back to the HTML listing if the API is slow |
+| WHO DON listing | HTML | HIGH 0.98 | the fallback path above |
+| **WHO AFRO RSS** | RSS (`afro.who.int/rss.xml`) | HIGH 0.96 | site-wide feed, so items are pre-filtered on outbreak terms before a Gemini call is spent |
+| CDC Travel Notices | RSS → notice pages | HIGH 0.95 | risk levels, rarely case counts |
+| ECDC | threat pages | HIGH 0.94 | |
+| **Africa CDC (ReliefWeb)** | ReliefWeb API, `source.name = Africa CDC` | HIGH 0.93 | Africa CDC's own reports, via OCHA's index |
+| ReliefWeb | ReliefWeb API, `disaster_type = EP` | HIGH 0.92 | situation reports with counts |
+| ProMED | feed, falling back to the posts index | HIGH 0.90 | |
+| **FCDO Travel Advisories** | gov.uk search API (JSON) | HIGH 0.85 | advisories, not counts |
+| Outbreak News Today | RSS | MEDIUM 0.72 | |
+| WHO AFRO | listing text | HIGH 0.96 | kept for pages the feed misses |
+| HealthMap | listing text | MEDIUM 0.78 | JS-heavy, often yields nothing |
+| GDELT | DOC 2.0 API | LOW 0.42 | news corroboration, off unless `ENABLE_GDELT=1` |
 
----
+### Requested but not added
+
+These were asked for and checked; each is missing for a specific reason, not
+an oversight:
+
+| Source | Why not |
+|---|---|
+| IDSP (India) | published as PDF/Excel bulletins, no machine-readable endpoint |
+| data.gov.in | has an API but needs a key and a per-resource ID; the outbreak datasets are heterogeneous CSVs |
+| PIB health releases | HTML listings only; Firecrawl would need a paid key — Tavily research already covers this ground |
+| EIOS | login-gated (WHO account required) |
+| HealthMap API | key required, and access is restricted |
+| OpenFDA | drugs, devices and food recalls — not outbreak surveillance |
+| disease.sh | COVID-19, influenza and vaccines only |
+| Global.health | GitHub line-list CSVs, an import rather than a feed |
+| UKHSA | metrics-by-geography API (cases per day per region), not an outbreak feed |
+| APIS Asia | dashboard only, no public API |
+| Taiwan CDC / Singapore MOH | open-data portals need dataset IDs; no outbreak feed |
+| WHO EMRO / SEARO / WPRO | regional pages and newsletters, no stable feed |
+| US State Dept advisories | the RSS path (`travel.state.gov/_res/rss/TAsTWRSS.xml`) now returns 404 |
+
+Adding any of these later means writing one parser and one registry entry —
+`parse_<name>(payload, cfg, limit)` plus a row in `SOURCES`.
 
 ## Setup
 

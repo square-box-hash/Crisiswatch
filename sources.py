@@ -52,6 +52,14 @@ class Candidate:
 # Source registry
 # =============================================================================
 
+# Used to keep site-wide feeds from spending a Gemini call per press release.
+OUTBREAK_TERMS = [
+    "outbreak", "epidemic", "pandemic", "cholera", "ebola", "mpox", "monkeypox",
+    "measles", "dengue", "yellow fever", "polio", "typhoid", "diphtheria",
+    "marburg", "lassa", "hepatitis", "meningitis", "plague", "rabies",
+    "anthrax", "h5n1", "avian influenza", "covid", "nipah", "rift valley",
+]
+
 SOURCES = {
     # ── Feeds and APIs (article-level) ──
     "WHO DON": {
@@ -115,6 +123,50 @@ SOURCES = {
         "enabled": bool(os.getenv("ENABLE_GDELT")),
     },
 
+    # ── WHO Disease Outbreak News, structured API ──
+    "WHO DON API": {
+        "kind": "articles",
+        "parser": "who_don_api",
+        "url": "https://www.who.int/api/emergencies/diseaseoutbreaknews",
+        # The API is a heavy payload and sometimes slow; the listing still works.
+        "fallback_url": "https://www.who.int/emergencies/disease-outbreak-news",
+        "reputation": 0.98,
+        "tier": "HIGH",
+        "limit": 10,
+    },
+
+    # ── WHO AFRO site feed (site-wide, so pre-filter on outbreak terms) ──
+    "WHO AFRO RSS": {
+        "kind": "articles",
+        "parser": "rss",
+        "url": "https://www.afro.who.int/rss.xml",
+        "reputation": 0.96,
+        "tier": "HIGH",
+        "limit": 10,
+        "filter_terms": OUTBREAK_TERMS,
+    },
+
+    # ── Africa CDC reports, via ReliefWeb's JSON API ──
+    "Africa CDC (ReliefWeb)": {
+        "kind": "articles",
+        "parser": "reliefweb",
+        "url": "https://api.reliefweb.int/v1/reports",
+        "reputation": 0.93,
+        "tier": "HIGH",
+        "limit": 8,
+        "reliefweb_source": "Africa CDC",
+    },
+
+    # ── FCDO travel advice (gov.uk search API, no key) ──
+    "FCDO Travel Advisories": {
+        "kind": "articles",
+        "parser": "fcdo",
+        "url": "https://www.gov.uk/api/search.json",
+        "reputation": 0.85,
+        "tier": "HIGH",
+        "limit": 8,
+    },
+
     # ── Listing pages (legacy: text straight to Gemini) ──
     "WHO AFRO": {
         "kind": "listing",
@@ -171,6 +223,13 @@ def _absolutise(base: str, href: str) -> Optional[str]:
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return None
     return url
+
+
+def matches_terms(candidate: Candidate, terms) -> bool:
+    """Does this item look like it is about an outbreak at all?"""
+
+    haystack = f"{candidate.title} {candidate.inline_text}".lower()
+    return any(term in haystack for term in terms)
 
 
 def _links(html: str, base_url: str, fragments, limit: int) -> list[str]:
@@ -377,6 +436,63 @@ def parse_gdelt(payload: dict, cfg: dict, limit: int) -> list[Candidate]:
     return out
 
 
+def parse_who_don_api(payload: dict, cfg: dict, limit: int) -> list[Candidate]:
+    """WHO's own JSON API for Disease Outbreak News (OData: rows in `value`)."""
+
+    rows = (payload or {}).get("value") or (payload or {}).get("items") or []
+    out = []
+
+    for row in rows[:limit]:
+        url_name = (row.get("UrlName") or "").strip()
+        title = (row.get("Title") or "").strip()
+
+        if not url_name:
+            continue
+
+        out.append(
+            Candidate(
+                source_name="WHO DON API",
+                url=f"https://www.who.int/emergencies/disease-outbreak-news/item/{url_name}",
+                title=title,
+                published_at=_parse_date(row.get("PublicationDateAndTime")),
+                reputation=cfg["reputation"],
+                tier=cfg["tier"],
+                inline_text=html_to_text(row.get("Summary") or "", 2000),
+            )
+        )
+
+    return out
+
+
+def parse_fcdo(payload: dict, cfg: dict, limit: int) -> list[Candidate]:
+    """FCDO travel advice from the gov.uk search API. No key required."""
+
+    out = []
+
+    for row in (payload or {}).get("results", [])[:limit]:
+        link = row.get("link") or ""
+        if not link.startswith("/"):
+            continue
+
+        slug = link.rstrip("/").split("/")[-1]
+        country = " ".join(part.capitalize() for part in slug.split("-"))
+
+        out.append(
+            Candidate(
+                source_name="FCDO Travel Advisories",
+                url=f"https://www.gov.uk{link}",
+                title=(row.get("title") or "").strip(),
+                published_at=_parse_date(row.get("public_timestamp")),
+                reputation=cfg["reputation"],
+                tier=cfg["tier"],
+                hint_country=country,
+                inline_text=html_to_text(row.get("description") or "", 1000),
+            )
+        )
+
+    return out
+
+
 PARSERS = {
     "who_don": parse_who_don,
     "ecdc": parse_ecdc,
@@ -384,6 +500,8 @@ PARSERS = {
     "reliefweb": parse_reliefweb,
     "promed": parse_promed,
     "gdelt": parse_gdelt,
+    "who_don_api": parse_who_don_api,
+    "fcdo": parse_fcdo,
 }
 
 
@@ -439,14 +557,59 @@ async def collect_source(client, name: str, cfg: dict, record=None) -> list[Cand
                 "appname": "crisiswatch",
                 "limit": limit,
                 "sort[]": "date:desc",
-                "filter[field]": "disaster_type",
-                "filter[value]": "EP",
                 "fields[include][]": RELIFWEB_FIELDS,
             }
+
+            if cfg.get("reliefweb_source"):
+                # One publisher's reports (e.g. Africa CDC) rather than all epidemics.
+                params["filter[field]"] = "source.name"
+                params["filter[value]"] = cfg["reliefweb_source"]
+            else:
+                params["filter[field]"] = "disaster_type"
+                params["filter[value]"] = "EP"
+
             payload = await fetch_json(client, cfg["url"], params=params, record=record)
             if not payload:
                 return []
             candidates = parse_reliefweb(payload, cfg, limit)
+
+        elif parser_name == "who_don_api":
+            params = {
+                "$orderby": "PublicationDateAndTime desc",
+                "$top": limit,
+                "$select": "Title,UrlName,PublicationDateAndTime,Summary",
+            }
+            payload = await fetch_json(client, cfg["url"], params=params, record=record)
+
+            if payload:
+                candidates = parse_who_don_api(payload, cfg, limit)
+            else:
+                # Fall back to the HTML listing rather than losing the source.
+                fallback = cfg.get("fallback_url")
+                log.info(f"[Source] WHO DON API unavailable, falling back to {fallback}")
+                html = await fetch_bytes(client, fallback, record=record) if fallback else None
+                candidates = (
+                    parse_who_don(
+                        html.decode("utf-8", "replace"),
+                        {**cfg, "url": fallback},
+                        limit,
+                    )
+                    if html
+                    else []
+                )
+
+        elif parser_name == "fcdo":
+            params = {
+                "filter_organisations": "foreign-commonwealth-development-office",
+                "filter_content_store_document_type": "travel_advice",
+                "order": "-public_timestamp",
+                "count": limit,
+                "fields": "title,link,description,public_timestamp",
+            }
+            payload = await fetch_json(client, cfg["url"], params=params, record=record)
+            if not payload:
+                return []
+            candidates = parse_fcdo(payload, cfg, limit)
 
         elif parser_name == "gdelt":
             params = {
@@ -466,7 +629,22 @@ async def collect_source(client, name: str, cfg: dict, record=None) -> list[Cand
             raw = await fetch_bytes(client, cfg["url"], record=record)
             if not raw:
                 return []
-            candidates = PARSERS[parser_name](raw, {**cfg, "name": name}, limit)
+
+            terms = cfg.get("filter_terms")
+            # Pull a wider slice first, otherwise a site-wide feed's newest ten
+            # items can all be press releases and the outbreak ones get cut.
+            fetch_limit = limit * 5 if terms else limit
+            candidates = PARSERS[parser_name](raw, {**cfg, "name": name}, fetch_limit)
+
+            if terms:
+                before = len(candidates)
+                candidates = [c for c in candidates if matches_terms(c, terms)][:limit]
+                if before and not candidates and record is not None:
+                    record.fail(
+                        "collect", name, diagnostics.NO_MATCH,
+                        f"{before} feed item(s), none mentioned an outbreak term",
+                        url=cfg.get("url"),
+                    )
 
         else:
             html = await fetch_bytes(client, cfg["url"], record=record)
