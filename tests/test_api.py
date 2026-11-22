@@ -496,3 +496,11 @@ def test_health_reports_the_model_in_use(client):
     # otherwise you cannot tell whether an env change reached the instance.
     assert body["gemini_model"]
     assert isinstance(body["gemini_model"], str)
+
+
+def test_every_read_endpoint_is_uncacheable(client):
+    seed()
+    for path in ("/", "/health", "/stats", "/runs", "/outbreaks"):
+        resp = client.get(path)
+        assert resp.status_code == 200, path
+        assert "no-store" in resp.headers["cache-control"], path

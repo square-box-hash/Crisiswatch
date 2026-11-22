@@ -25,6 +25,19 @@ app.add_middleware(
 SEVERITY_RANK = {"critical": 0, "high": 1, "moderate": 2, "low": 3}
 
 
+@app.middleware("http")
+async def no_store(request, call_next):
+    """Every response here is live data — a cached one is a lie.
+
+    Without this, /runs and /stats can be served from a proxy or browser cache
+    and show a run from hours ago as if it were the latest.
+    """
+
+    response = await call_next(request)
+    response.headers["Cache-Control"] = "no-store, max-age=0"
+    return response
+
+
 # ─────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────
