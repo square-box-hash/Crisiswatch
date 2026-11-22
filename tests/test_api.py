@@ -487,3 +487,12 @@ def test_runs_endpoint_respects_limit(client):
         )
 
     assert len(client.get("/runs?limit=2").json()) == 2
+
+
+def test_health_reports_the_model_in_use(client):
+    body = client.get("/health").json()
+
+    # Whatever GEMINI_MODEL resolves to in this process, it must be visible —
+    # otherwise you cannot tell whether an env change reached the instance.
+    assert body["gemini_model"]
+    assert isinstance(body["gemini_model"], str)

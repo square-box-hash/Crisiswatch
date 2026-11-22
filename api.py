@@ -9,6 +9,7 @@ import re
 
 import assess
 import db
+import extract
 import store
 from worker import register_worker, verify_worker, submit_worker_message
 
@@ -172,6 +173,9 @@ def health(response: Response):
         "outbreaks": 0,
         "last_run": None,
         "gemini_key": bool(os.getenv("GEMINI_API_KEY")),
+        # The model the running process will actually call — proves whether an
+        # environment change reached this instance.
+        "gemini_model": extract.GEMINI_MODEL,
         "mongo_uri": bool(os.getenv("MONGODB_URI")),
     }
 
