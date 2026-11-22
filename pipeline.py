@@ -564,6 +564,7 @@ async def run_pipeline(
             summary["errors"].append(
                 "Gemini daily quota exhausted: research and synthesis skipped"
             )
+            summary["degraded"] = True
 
         # ── 5a. Research the records that are still thin ──
         if research.enabled() and not quota_exhausted:

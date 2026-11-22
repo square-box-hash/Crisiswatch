@@ -71,6 +71,10 @@ ADVICE = {
 
 MAX_FAILURES = 60
 MAX_MESSAGE = 400
+# Quota errors carry the quota id and reset delay at the end, so truncating them
+# at 400 chars hides exactly the part that says whether it is per-minute or
+# per-day.
+MAX_QUOTA_MESSAGE = 1600
 
 
 @dataclass
@@ -159,7 +163,12 @@ class Recorder:
             self.dropped += 1
             return
 
-        failure.message = (failure.message or "")[:MAX_MESSAGE]
+        limit = (
+            MAX_QUOTA_MESSAGE
+            if failure.kind in (RATE_LIMIT, QUOTA)
+            else MAX_MESSAGE
+        )
+        failure.message = (failure.message or "")[:limit]
         self.failures.append(failure)
 
         log.debug(f"[diag] {failure.line()}")

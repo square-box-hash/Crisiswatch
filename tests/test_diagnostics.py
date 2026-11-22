@@ -212,3 +212,21 @@ def test_202_is_a_blocked_challenge_not_an_unknown():
 def test_looks_like_daily_quota_helper():
     assert diagnostics.looks_like_daily_quota("limit: 20, per day") is True
     assert diagnostics.looks_like_daily_quota("retryDelay: 22s") is False
+
+
+def test_quota_messages_keep_the_quota_id():
+    """The useful part of a 429 is at the end: quotaId and retryDelay."""
+    record = Recorder()
+    long_message = "x" * 300 + " quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier retryDelay: 70236s"
+
+    record.fail("extract", "WHO DON", diagnostics.QUOTA, long_message)
+
+    assert "GenerateRequestsPerDayPerProjectPerModel-FreeTier" in record.failures[0].message
+    assert "retryDelay" in record.failures[0].message
+
+
+def test_ordinary_errors_are_still_truncated():
+    record = Recorder()
+    record.fail("fetch", "a", diagnostics.HTTP_ERROR, "y" * 5000)
+
+    assert len(record.failures[0].message) <= diagnostics.MAX_MESSAGE
